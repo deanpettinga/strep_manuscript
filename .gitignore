@@ -1,0 +1,17 @@
+.DS_Store
+*PGEC*.xlsx
+*~$PGEC.xlsx
+*.pcrd
+*.fna
+*.faa
+
+# anvio/*
+*STREP-GENOMES.db
+*Streptomyces-PAN.db
+*Streptomyces_COG_summary.csv
+
+epicon_field_16S_illumina/*
+epicon_field_16S_pacbio/*
+metabolomics/*
+microbox/*
+pangenome/*

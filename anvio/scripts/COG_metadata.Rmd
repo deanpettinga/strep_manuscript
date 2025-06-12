@@ -1,0 +1,158 @@
+---
+title: "COG metadata for Anvi'o"
+author: "Hannah Ploemacher"
+date: "2025-04-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require("knitr")
+opts_knit$set(root.dir = "~/Documents/Work UCB/Streptomyces manuscript")
+
+```
+
+```{r installing packages}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("dada2")
+install.packages("readr")
+```
+
+```{r packages}
+#load required packages
+library(readr) 
+library(ggplot2); packageVersion("ggplot2")
+library(dplyr); packageVersion("dplyr")
+
+theme_set(theme_bw())
+```
+
+```{r import files}
+Strep_csv <- read_csv("Streptomyces_COG_summary.csv")
+```
+
+```{r cog analysis code}
+#set colors for AC groups
+genome_colors <- c(
+  "DC01" = "#9a34ff",
+  "DC03" = "#9a34ff",
+  "DC04" = "#9a34ff",
+  "DC10" = "#659aff",
+  "DC13" = "#659aff",
+  "DC14" = "#659aff",
+  "DC17" = "#cccc9a",
+  "DC18" = "#cccc9a",
+  "DC20" = "#cccc9a",
+  "DC25" = "#659a33",
+  "DC27" = "#659a33",
+  "DC28" = "#659a33"
+)
+
+AC_colors <- c(
+  "AC2" = "#9a34ff",
+  "AC5" = "#659aff",
+  "AC6" = "#cccc9a",
+  "AC8" = "#659a33"
+)
+
+#Count gene clusters per genome per COG category
+cog_counts <- Strep_csv %>%
+  group_by(genome_name, COG20_CATEGORY_ACC) %>%
+  summarise(Count = n()) %>%
+  ungroup()
+
+#Plot a bar chart per genome
+plot <- ggplot(cog_counts, aes(x = COG20_CATEGORY_ACC, y = Count, fill = genome_name)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "COG Category Distribution per Genome", x = "COG Category", y = "Gene Cluster Count") +
+  theme_minimal()
+
+#barplot for search term in cog function
+fun_counts <- Strep_csv %>%
+  group_by(gene_cluster_id, genome_name, COG20_FUNCTION) %>%
+  summarise(CopyNumber = n(), .groups = "drop")
+
+AC_group <- data.frame(
+  genome_name = c("DC01", "DC03", "DC04", "DC10", "DC13", "DC14", "DC17", "DC18", "DC20", "DC25", "DC27", "DC28"),
+  AC_group = c("AC2", "AC2", "AC2", "AC5", "AC5", "AC5", "AC6", "AC6", "AC6", "AC8", "AC8", "AC8"),
+  stringsAsFactors = FALSE
+)
+
+fun_counts <- fun_counts %>%
+  left_join(AC_group, by = "genome_name")
+
+#Set search term (case-insensitive)
+search_term <- "Glycerol-3-phosphate"
+search_term <- "Siderophore"
+search_term <- "Iron"
+search_term <- "Kdp" #set case-sensitive
+search_term <- "Trk" #set case-sensitive
+search_term <- "OmpR" #set case-sensitive
+search_term <- "ProP" #set case-sensitive
+search_term <- "FabG" #set case-sensitive
+
+  
+
+#plot
+fun_counts %>%
+  filter(grepl(search_term, COG20_FUNCTION, ignore.case = TRUE)) %>%
+  # Join the group column
+  group_by(genome_name) %>% 
+  summarise(TotalCopies = sum(CopyNumber), .groups = "drop") %>%
+  left_join(AC_group, by = "genome_name") %>% 
+  ggplot(aes(x = genome_name, y = TotalCopies, fill = AC_group)) + 
+  # Fill by 'group'
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = AC_colors) + 
+  # Use custom group colors
+  labs(title = paste("Total Copies Matching:", search_term),
+       x = "Genome", y = "Total Copy Number", fill = "AC group") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#summarize search terms into datafile (ignore case)
+fun_search_terms <- c("Iron", "Siderophore", "Glycerol-3-phosphate")
+
+search_summary <- lapply(fun_search_terms, function(term) {
+  fun_counts %>%
+    filter(grepl(term, COG20_FUNCTION, ignore.case = TRUE)) %>%
+    group_by(genome_name, AC_group) %>%
+    summarise(CopyNumber = sum(CopyNumber), .groups = "drop") %>%
+    mutate(SearchTerm = term)
+}) %>%
+  bind_rows()
+
+wide_summary <- search_summary %>%
+  tidyr::pivot_wider(
+    names_from = SearchTerm,
+    values_from = CopyNumber,
+    values_fill = 0
+  )
+print(wide_summary)
+
+write.csv(wide_summary, "Strep_fun_counts.csv", row.names = FALSE)
+
+#summarize DO NOT ignore case (genes)
+fun_search_terms <- c("Trk", "Kdp", "OmpR", "FabG", "ProP")
+
+search_summary <- lapply(fun_search_terms, function(term) {
+  fun_counts %>%
+    filter(grepl(term, COG20_FUNCTION, ignore.case = FALSE)) %>%
+    group_by(genome_name, AC_group) %>%
+    summarise(CopyNumber = sum(CopyNumber), .groups = "drop") %>%
+    mutate(SearchTerm = term)
+}) %>%
+  bind_rows()
+
+wide_summary <- search_summary %>%
+  tidyr::pivot_wider(
+    names_from = SearchTerm,
+    values_from = CopyNumber,
+    values_fill = 0
+  )
+print(wide_summary)
+
+write.csv(wide_summary, "Strep_fun_counts2.csv", row.names = FALSE)
+```
