@@ -1,0 +1,211 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-11-11"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.height=8,
+                      fig.width=10)
+```
+
+Libraries
+
+```{r}
+library(tidyverse)
+library(reshape2)
+library(farrowandball)
+library(ggtree)
+library(ggtreeExtra)
+library(ape)
+```
+
+# Functions
+
+```{r}
+reorder_cormat <- function(cormat){
+# Use correlation between variables as distance
+dd <- as.dist((1-cormat)/2)
+hc <- hclust(dd)
+cormat <-cormat[hc$order, hc$order]
+}
+
+plot_ani <- function(ani.tib){
+  df <- dcast(ani.tib, query ~ ref, value.var = "ANI") %>% 
+    as.data.frame() %>% 
+    column_to_rownames("query") %>%
+    as.matrix() %>%
+    reorder_cormat() %>%
+    melt(varnames = c("query","ref"), value.name = "ANI") %>%
+    mutate(Strain = ifelse(ANI > 98.8,"Y","N"),
+           ANI_round = round(ANI,digits = 0))
+    
+  
+  ggplot(df, aes(x = query, y = ref, fill = ANI, color = Strain, label = ANI_round)) +
+    # scale_fill_distiller(palette = "Purples", direction = 1) +
+    scale_fill_fb("daylong",discrete = F) +
+    scale_color_manual(values = c("Y" = "black","N" = "white"), guide = F) +
+    geom_tile(data = df %>% filter(Strain == "N")) +
+    geom_tile(data = df %>% filter(Strain == "Y"), size = 1.0125) +
+    theme_minimal() + 
+    theme(axis.text.x = element_text(angle = 270, vjust = 0.5, hjust = 1),
+          panel.grid.major = element_blank(),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank()) +
+    coord_fixed() 
+}
+
+```
+
+# Input
+
+```{r}
+col <- read_tsv("../raw_data/colonization.tsv") %>%
+  dplyr::filter(isolate != "Mock") %>%
+  dplyr::mutate(Enrichment_abs = abs(`log2(Drought/Water)`)) 
+
+plant <- read_tsv("../raw_data/microbox-plant-phenes_mean.tsv") %>%
+  dplyr::filter(!isolate == "Mock") %>%
+  dplyr::mutate(sig = ifelse(value < 0.15,"<0.15",">0.15"))
+
+tax <- read_tsv("../analysis/gtdbtk/gtdbtk.bac120.summary.tsv") %>%
+  rename(genome = user_genome) %>%
+  select(genome, classification) %>%
+  filter(grepl("SAI",genome)) %>%
+  mutate(classification = gsub("[a-z]__","",classification)) %>%
+  tidyr::separate(classification, c("Domain","Phylum","Class","Order","Family","Genus","Species"), sep = ";") %>%
+  mutate(Species = gsub("Streptomyces ", "", Species)) %>%
+  select(genome, Species) %>%
+  arrange(Species)
+
+# read tree data
+nwk <- read.tree("../analysis/gtotreeN/gtotreeN.tre") 
+
+# find MRCA of outgroup
+mrca <- MRCA(nwk, .node1 = "N_dokdonensis", .node2 = "N_humi")
+
+# root with outgroup
+tree <- nwk %>% root(., outgroup =  c("N_dokdonensis","N_humi"), resolve.root = T)
+
+# define outgroup as a grouped clade for formatting
+tree <- groupClade(tree, mrca)
+
+# manipulate root edge length to make visualization more compact
+tree$edge.length[1] <- 0.04
+
+ani <- read_tsv("../analysis/fastani/fastani_many-to-many.tsv",
+                col_names = c("ref","query","ANI","x","y")) %>% 
+  dplyr::select(-x,-y) %>% 
+  dplyr::mutate(ref = gsub("raw_data/fna/","",ref),
+                ref = gsub(".fna","",ref),
+                query = gsub("raw_data/fna/","",query),
+                query = gsub(".fna","",query))
+```
+
+## Tree
+
+### w/ Species Annotation
+
+```{r fig.width=5}
+ggtree(tree, aes(linetype = group)) %<+% col +
+  scale_linetype_manual(values = c("0" = "dotted", "1" = "solid")) +
+  geom_tiplab(size = 3, offset = 0.0025, align=F, linetype = NA)  +
+  geom_text(mapping = aes(y = genome,
+                          x = 1,
+                          label = Species),
+            data = tax)
+```
+
+
+### w/ DE
+
+```{r fig.height=8, fig.width=8}
+ggtree(tree, aes(linetype = group)) %<+% col +
+  scale_linetype_manual(values = c("0" = "dotted", "1" = "solid")) +
+  scale_fill_gradient2(low="#599ec4", high="#AF344D", mid = "white", midpoint = 0) +
+  geom_tiplab(size = 3, offset = 0.0025, align=F, linetype = NA) +
+  # geom_tippoint(aes(fill = `log2(Drought/Water)`),shape = 21, size = 3) +
+  geom_fruit(geom = geom_col,
+             mapping = aes(y = isolate,
+                           x = Enrichment_abs,
+                           fill = `log2(Drought/Water)`),
+             color = "black",
+             offset = 0.12) +
+             # axis.params=list(axis = "x",
+             #                  text.size = 1.5,
+             #                  hjust = 0.5,
+             #                  vjust = 1.5,
+             #                  nbreak = 10),
+             # grid.params=list(linetype=3,size=0.5)) +
+  theme(legend.position = "bottom")
+```
+
+### w/ Plant Phenotypes
+```{r fig.height=8, fig.width=8}
+ggtree(tree, aes(linetype = group)) + 
+  scale_linetype_manual(values = c("0" = "dotted", "1" = "solid")) +
+  scale_fill_gradient2(low="white", high="#8c510a") +
+  scale_color_manual(values = c("white","black")) +
+  geom_tiplab(size = 3, offset = 0.0025, align=F, linetype = NA) +
+  geom_fruit(geom = geom_tile,
+             mapping = aes(y = isolate,
+                           x = variable,
+                           fill = value,
+                           color = sig),
+             height = 0.9,
+             size = 0.5,
+             offset = 0.15,
+             pwidth = 0.01125,
+             data = plant %>% filter(treatment == "drought",
+                                     variable == "shoot_dryweight_g")) +
+  ggnewscale::new_scale_fill() +
+  scale_fill_gradient2(low="white", high="#1b7837",mid = 0.2) +
+  scale_color_manual(values = c("white","black")) +
+  geom_fruit(geom = geom_tile,
+             mapping = aes(y = isolate,
+                           x = variable,
+                           fill = value,
+                           color = sig),
+             height = 0.9,
+             size = 0.5,
+             offset = 0.045,
+             pwidth = 0.01125,
+             data = plant %>% filter(treatment == "water",
+                                     variable == "shoot_dryweight_g")) +
+  coord_fixed(ratio = 0.0125) +
+  theme(legend.position = "bottom")
+```
+
+### DE alone
+
+```{r fig.width=5, fig.height=6}
+
+col %>% 
+  mutate(isolate = factor(isolate, levels=col %>% arrange(`log2(Drought/Water)`) %>% .$isolate)) %>%
+  ggplot(aes(x = `log2(Drought/Water)`, y = isolate, fill = `log2(Drought/Water)`)) +
+    scale_fill_gradient2(low="#599ec4", high="#AF344D", mid = "white", midpoint = 0) +
+    geom_col(color = "black") +
+    theme_bw()
+```
+
+### w/ ANI
+```{r fig.height=6, fig.width=10}
+ani.dcast <- reshape2::dcast(ani, formula = ref ~ query) %>% 
+  rename("isolate" = "ref") %>% column_to_rownames("isolate") %>%
+  dplyr::select(grep("SAI",tree$tip.label,value = T))
+
+p <- ggtree(tree, aes(linetype = group)) %<+% ani +
+  scale_linetype_manual(values = c("0" = "dotted", "1" = "solid")) +
+  geom_tiplab(size = 2, offset = 0.0025, align=F, linetype = NA)
+
+gheatmap(p, 
+         data = ani.dcast[grep("SAI",get_taxa_name(p),value= T),grep("SAI",get_taxa_name(p),value= T)],
+         colnames_angle = -90,
+         font.size = 2,
+         hjust = 1,
+         high = "#5d82a1", low = "#f7e29d", legend_title = "ANI",
+         offset = 0.035, width = 3)
+
+```
+

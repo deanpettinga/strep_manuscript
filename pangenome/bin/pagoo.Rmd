@@ -1,0 +1,299 @@
+---
+title: "pangenomics"
+output: html_document
+date: "2025-04-17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# theme_set(theme_bw())
+```
+
+```{r}
+library(pagoo)
+library(micropan)
+library(tidyverse)
+library(farrowandball)
+```
+
+# Import
+
+```{r}
+meta <- read_tsv("../bin/genome_metadata.tsv", show_col_types = F) %>% 
+  select(isolate,strain,species,biolog_phenotype) %>%
+  rename(genome = isolate)
+
+cog_anno <- data.table::fread("../../references/cog-2020/cog-20.def.tab") %>%
+  dplyr::select(V1,V2,V3,V4,V5) %>%
+  dplyr::rename(COG=V1, COG_Category=V2, COG_Description = V3, COG_Gene = V4, COG_Pathway = V5)
+
+emap <- read_tsv("../analysis/emapper/out.emapper.annotations", comment = "##") %>% 
+  dplyr::rename("orthogroup" = "#query","GO" = "GOs") %>%
+  dplyr::mutate(orthogroup = gsub("-consensus", "", orthogroup),
+         COG = str_extract(eggNOG_OGs, "^COG[0-9]{4}")) %>%
+  dplyr::left_join(cog_anno) %>%
+  dplyr::select(orthogroup, COG, COG_Category, COG_Description, COG_Gene, COG_Pathway, GO, EC, KEGG_ko, CAZy, PFAMs) %>%
+  dplyr::rename(cluster = orthogroup)
+
+gtdbtk <- read_tsv("../analysis/gtdbtk/gtdbtk.bac120.summary.tsv", show_col_types = F) %>%
+  dplyr::select(user_genome, classification) %>%
+  dplyr::rename(genome = user_genome) %>%
+  dplyr::mutate(classification = str_remove_all(classification,"[a-z]__")) %>%
+  tidyr::separate(classification, c("domain","phylum","class","order","family","genus","species"), sep = ";") %>%
+  dplyr::filter(genus != "Nocardioides") %>%
+  dplyr::select(genome,species) %>%
+  dplyr::mutate(species = str_remove_all(species,"Streptomyces "),
+         species = case_when(species == "canus_D" ~ "canus",
+                             grepl("^sp[0-9].",species) ~ NA,
+                             species == "" ~ NA,
+                             TRUE ~ species)) %>%
+  left_join(meta %>% select(genome,strain), by = "genome")
+
+prokka <- do.call(rbind,
+                  lapply(Sys.glob("../analysis/prokka/*.txt") %>%
+                           str_extract("SAI[0-9]{3}"), function(x) data.table::fread(paste0("../analysis/prokka/",x,".txt"), sep = ":", header = F) %>%
+                           dplyr::mutate(genome = x))) %>%
+  dplyr::rename(parameter = V1, value = V2) %>%
+  dplyr::filter(!parameter == "organism") %>%
+  dplyr::select(genome,parameter,value) %>%
+  dplyr::left_join(gtdbtk, by = "genome")
+
+quast <- read_tsv("../analysis/quast/report.tsv", show_col_types = F) %>%
+  reshape2::melt(variable.name = "genome") %>%
+  dplyr::rename(parameter = Assembly) %>% arrange(parameter) %>%
+  dplyr::filter(parameter %in% c("# contigs","GC (%)","N90","Total length")) %>%
+  dplyr::select(genome,parameter,value) %>%
+  dplyr::left_join(gtdbtk, by = "genome")
+
+stats <- rbind(prokka,quast) %>%
+  dplyr::arrange(genome,parameter) %>%
+  dplyr::filter(!parameter %in% c("repeat_region","tmRNA","# contigs")) %>%
+  dplyr::mutate(value = as.numeric(value)) %>%
+  left_join(meta, by = "genome")
+
+stats
+
+rm(prokka)
+```
+
+```{r}
+col <- read_tsv("../raw_data/colonization.tsv")
+
+plant <- read_tsv("../raw_data/microbox-plant-phenes_mean.tsv") %>% 
+  group_by(isolate,treatment,variable) %>%
+  summarize(val = mean(value)) %>%
+  reshape2::dcast(formula = isolate + treatment ~ variable)
+
+plant <- left_join(plant %>%
+                     dplyr::filter(treatment == "drought") %>%
+                     dplyr::select(-treatment) %>%
+                     dplyr::rename(drought_pwc = pwc,
+                                   drought_dw = shoot_dryweight_g,
+                                   drought_fw = shoot_freshweight_g),
+                   plant %>%
+                     dplyr::filter(treatment == "water") %>%
+                     dplyr::select(-treatment) %>%
+                     dplyr::rename(water_pwc = pwc,
+                                   water_dw = shoot_dryweight_g,
+                                   water_fw = shoot_freshweight_g),
+                   by = "isolate")
+
+phenes <- left_join(col,plant, by = "isolate")
+rm(col,plant)
+
+```
+
+
+# Genome Stats
+
+```{r fig.width=8}
+ggplot(stats, aes(y = value, x = parameter, color = species, fill = species)) +
+  scale_color_fb("spec", na.value = "gray") +
+  scale_fill_fb("spec", na.value = "gray") +
+  geom_boxplot(outlier.shape = NA, aes(group = parameter)) +
+  geom_jitter(shape = 21, alpha = 0.6, height = 0, size = 3, width = 0.1) +
+  facet_wrap(vars(parameter), scales = "free") +
+  theme_bw()
+```
+
+
+```{r fig.width=8}
+stats %>% 
+  select(genome,strain,parameter,value) %>%
+  mutate(strain = as.factor(strain)) %>%
+  reshape2::dcast(genome + strain ~ parameter) %>%
+ggplot(aes(x = bases, y = `GC (%)`, size = CDS, fill = strain, label = genome, group = strain)) +
+  scale_fill_fb("spec",discrete = T) +
+  # stat_ellipse(aes(fill=strain), geom="polygon", alpha = 0.5, level = 0.9, show.legend = F) +
+  ggrepel::geom_text_repel(size = 3, min.segment.length = 0, max.overlaps = 20) +
+  geom_point(shape = 21) +
+  guides(fill = guide_legend(override.aes = list(size = 3))) +
+  theme_bw() +
+  xlab("Genome Length")
+```
+
+
+
+
+# Pagoo input
+
+```{r}
+og <- read_tsv("../analysis/orthofinder/Orthogroups/Orthogroups.tsv") %>%
+  reshape2::melt(id.vars = "Orthogroup", variable.name = "genome") %>%
+  mutate(n_col = as.numeric(str_count(value,",") + 1)) %>%
+  filter(!is.na(value))
+
+# prep with required data for pagoo
+og <- og %>% 
+  tidyr::separate(value, into = as.character(seq(1:max(og$n_col))), sep = ", ") %>%
+  reshape2::melt(id.vars = c("Orthogroup","genome"),variable.name = "col",value.name = "gene") %>%
+  dplyr::arrange(Orthogroup,genome) %>%
+  dplyr::filter(!col == "n_col") %>%
+  dplyr::select(-col) %>%
+  dplyr::filter(!is.na(gene)) %>%
+  dplyr::rename(cluster = Orthogroup,org = genome) %>%
+  dplyr::select(gene,org,cluster)
+
+pg <- pagoo(data = og, # required data
+            org_meta = gtdbtk %>% dplyr::rename(org = genome) %>% as.data.frame()) # organism data
+            # cluster_meta = as.data.frame(emap)) # cluster data
+```
+
+# IMPORT SEQ INTO PAGOO
+```{r}
+# Sequences
+fasta_files <- grep("[.]fasta", files, value = TRUE) # List fasta files
+names(fasta_files) <- sub('[.]fasta', '', basename(fasta_files)) # Name them 
+# Read fasta files with Biostrings:
+library(Biostrings)
+sq <- lapply(fasta_files, readDNAStringSet)
+class(sq) # Is list?
+```
+
+# Gene Abund Dist.
+
+```{r}
+# pg$dist()
+pg$dist(method = "jaccard", binary = T)
+```
+
+# BarPlot
+
+```{r}
+pg$gg_barplot() + theme_bw()
+```
+
+# BinMap
+
+```{r fig.height=6}
+pg$gg_binmap() + 
+  # scale_fill_manual(values = c("black","gray")) +
+  theme_bw()
+```
+
+# Curves
+
+```{r}
+pg$gg_curves() +
+  geom_point(alpha = 0.6) + 
+  # facet_wrap(~Category, scales = 'free_y') + 
+  theme_bw(base_size = 15) + 
+  scale_color_manual(values = c("#5d82a1","#f7e29d"))
+
+```
+
+# PCA
+
+```{r}
+pg$core_genes
+
+pg$gg_pca(colour = 'species', size = 4) + 
+  theme_bw() +
+  scale_color_fb("spec", na.value = "gray")
+
+```
+
+# core/pan estimation
+```{r}
+# install.packages("micropan")
+pg.binomix <- micropan::binomixEstimate(pg$pan_matrix,
+                                        K.range = 5:10,
+                                        core.detect.prob = 1,
+                                        verbose = T)
+
+# show the best fit of K (minimum Bayesian Information Criterion)
+pg.binomix$BIC.tbl %>% arrange(BIC) %>% top_n(1,wt = -BIC)
+
+# confirm the Detection.prob = 1 with this K indicating proper id of core genes.
+pg.binomix$Mix.tbl %>% 
+  filter(Components == pg.binomix$BIC.tbl %>% arrange(BIC) %>% top_n(1,wt = -BIC) %>% .$K.range,
+         Detection.prob == 1) 
+```
+
+## Core
+```{r}
+og %>% 
+  group_by(cluster,org) %>% summarize(n= n()) %>%
+  filter(n > 0) %>% select(-n) %>%
+  group_by(cluster) %>% summarize(n= n()) %>% 
+  filter(n == 48) %>% 
+  nrow()
+```
+
+## Pan
+```{r}
+og %>%
+  group_by(cluster, org) %>% 
+  summarize(n = n()) %>%
+  select(-n) %>%
+  group_by(cluster) %>%
+  summarize(n = n()) %>%
+  filter(n==1)
+  
+  
+  filter(n > 0) %>% select(-n) %>%
+  group_by(cluster) %>% 
+  summarize(n= n()) %>% 
+  filter(n == 1) %>%
+  nrow()
+  
+```
+
+# Fluidity
+
+```{r}
+
+fluid_stats <- function(TYPE, ID){
+  if (TYPE == "species"){
+    Mean <- pg$pan_matrix[meta %>% filter(species == ID) %>% .$genome,] %>% micropan::fluidity(n.sim = 100) %>% .["Mean"]
+    Std <- pg$pan_matrix[meta %>% filter(species == ID) %>% .$genome,] %>% micropan::fluidity(n.sim = 100) %>% .["Std"]
+    Count <- meta %>% filter(species == ID) %>% nrow()
+  }
+  if (TYPE == "strain"){
+    Mean <- pg$pan_matrix[meta %>% filter(strain == ID) %>% .$genome,] %>% micropan::fluidity(n.sim = 100) %>% .["Mean"]
+    Std <- pg$pan_matrix[meta %>% filter(strain == 1) %>% .$genome,] %>% micropan::fluidity(n.sim = 100) %>% .["Std"]
+    Count <- meta %>% filter(strain == ID) %>% nrow()
+  }
+  return(c(Type = TYPE, ID = ID, Count = as.numeric(Count), Mean = as.numeric(Mean), Std = as.numeric(Std)))
+}
+
+fluid_res <- rbind(do.call(rbind,
+              lapply(meta %>% group_by(species) %>% summarize(n = n()) %>% filter(n > 1) %>% .$species,
+                     function(x) fluid_stats("species",x))),
+      do.call(rbind,
+              lapply(meta %>% group_by(strain) %>% summarize(n = n()) %>% filter(n > 1) %>% .$strain,
+                     function(x) fluid_stats("strain",x)))) %>%
+  as.data.frame() %>% 
+  mutate(Count = as.numeric(Count),
+         Mean = as.numeric(Mean),
+         Std = as.numeric(Std))
+
+pg$pan_matrix %>% micropan::fluidity(n.sim = 1000)
+fluid_res %>% filter(Type == "species") %>% arrange(-Mean)
+fluid_res %>% filter(Type == "strain") %>% arrange(-Mean)
+
+```
+
+
+
+

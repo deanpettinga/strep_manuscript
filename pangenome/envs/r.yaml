@@ -1,0 +1,10 @@
+name: r
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - r-tidyverse = 2.0.0
+  - r-reshape2 = 1.4.4
+  - r-phytools = 2.3-0
+  - r-nlme = 3.1_165
+  - r-matrixstats = 1.5.0

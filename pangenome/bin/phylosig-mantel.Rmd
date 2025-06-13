@@ -1,0 +1,502 @@
+---
+title: "pangenomics"
+output: html_document
+date: "2025-04-17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# theme_set(theme_bw())
+```
+
+```{r}
+library(tidyverse)
+library(ggrepel)
+library(farrowandball)
+library(vegan)
+library(ade4)
+library(phytools) # 2.3-0
+library(nlme) # 3.1-162
+library(patchwork)
+```
+
+# Functions
+
+```{r}
+reorder_distance_matrices <- function(mat1, mat2, reference = 1) {
+  # Determine which matrix is the reference
+  if (reference == 1) {
+    ref_mat <- mat1
+    target_mat <- mat2
+  } else {
+    ref_mat <- mat2
+    target_mat <- mat1
+  }
+  
+  # Get row/column names from both matrices
+  ref_names <- rownames(ref_mat)
+  target_names <- rownames(target_mat)
+  
+  # Check if all names in the reference matrix exist in the target matrix
+  if (!all(ref_names %in% target_names)) {
+    stop("Not all row/column names in reference matrix exist in target matrix")
+  }
+  
+  # Reorder target matrix to match reference matrix
+  reordered_target <- target_mat[ref_names, ref_names]
+  
+  if (reference == 1) {
+    return(list(matrix1 = mat1, matrix2 = reordered_target))
+  } else {
+    return(list(matrix1 = reordered_target, matrix2 = mat2))
+  }
+}
+
+proc_mantel_plot <- function(dist.1, dist.2, data.1, data.2){
+  set.seed(1234)
+  if (!identical(rownames(dist.1), rownames(dist.2))){
+  stop("'param1' must be provided as a character vector")
+  }
+  
+# calculate MDS/PCoA
+  # if distances are not euclidean, add small value to all 
+  # distances to prevent negative eigenvalues
+  MDS.1 <- cmdscale(dist.1,eig = T,add = !(is.euclid(dist.1)))
+  MDS.2 <- cmdscale(dist.2,eig = T,add = !(is.euclid(dist.2)))
+  
+  # procrustes analysis
+  pro <- procrustes(MDS.1, MDS.2, symmetric = TRUE, scale = T)
+  # formal test for procrustes correlation
+  pro.test <- protest(MDS.1, MDS.2, permutations = 9999)
+  # Mantel Test for correlation of two matrices
+  man <- vegan::mantel(dist.1, dist.2, method = "pearson", permutations = 9999)
+  
+  # ggplot the procrustes rotation
+  p <- rbind(as.data.frame(pro$X) %>% 
+               rownames_to_column("isolate") %>% 
+               dplyr::rename(PC1="Dim1", PC2="Dim2") %>%
+               dplyr::mutate(data = data.1),
+             as.data.frame(pro$Yrot) %>% 
+               rownames_to_column("isolate") %>%
+               dplyr::rename(PC1="V1", PC2="V2") %>%
+               dplyr::mutate(data = data.2)) %>%
+    ggplot(aes(x=PC1, y=PC2, shape=data, fill=data, group = isolate, label = isolate)) +
+      scale_shape_manual(values = c("Biolog"=21,
+                                    "Tree"=24,
+                                    "ANI"=23,
+                                    "OG"=22,
+                                    "DE"=25)) + 
+      scale_fill_manual(values = c("Biolog"="#f7e29d",
+                                   "Tree"="#909e6e",
+                                   "OG"="#a1c5c8",
+                                   "ANI"="#ab6758",
+                                   "DE"="#8d8089")) +
+      geom_path() +
+      geom_point(size = 5) +
+      theme_bw() +
+      ggtitle(paste0("Procrustes: ",round(pro.test$t0,3),", ","p=",round(pro.test$signif,3),"\n",
+                     "Mantel p=",round(man$signif,3)))
+  
+  return(list(procrustes = pro,
+              protest = pro.test,
+              mantel = man,
+              figure = p))
+}
+```
+
+# Import
+
+```{r}
+og <- read_tsv("../analysis/orthofinder/Orthogroups/Orthogroups.GeneCount.tsv") %>%
+  dplyr::select(-Total) %>%
+  column_to_rownames("Orthogroup") %>% 
+  t() %>% 
+  as.data.frame()
+  
+biolog <- read_tsv(file = "../raw_data/biolog-phenotypes.tsv") %>% 
+  reshape2::dcast(., Isolate ~ Content) %>% 
+  column_to_rownames("Isolate")
+
+ani <- read_tsv("../analysis/fastani/fastani_many-to-many.tsv",
+                col_names = c("reference","query","ANI","x","y")) %>% 
+  select(-x,-y) %>% 
+  mutate(reference = gsub("raw_data/fna/","",reference),
+         reference = gsub(".fna","",reference),
+         query = gsub("raw_data/fna/","",query),
+         query = gsub(".fna","",query))
+
+plant <- read_tsv("../raw_data/microbox-plant-phenes_mean.tsv") %>%
+  filter(variable == "shoot_dryweight_g",
+         isolate != "Mock") %>%
+  select(isolate,treatment,value) %>%
+  rename(shoot_dryweight_g = value)
+
+de <- read_tsv("../raw_data/colonization.tsv") %>%
+  mutate(DE = mean_col.drought/mean_col.water) %>%
+  select(isolate,DE)
+```
+
+# Mantel Test 
+
+## ANI-Plant Biomass
+
+```{r}
+ani.mat <- reshape2::dcast(ani, reference ~ query, value.var = "ANI") %>% 
+  column_to_rownames("reference") %>% 
+  as.matrix() %>% as.dist(upper = T) %>% 
+  as.matrix()
+
+drought.mat <- ((1-dist(plant %>% 
+                         filter(treatment == "drought") %>%
+                         select(-treatment) %>% 
+                         column_to_rownames("isolate"),
+                       method = "euclidean",
+                       upper = T)) * 100) %>% as.matrix()
+
+water.mat <- ((1-dist(plant %>% 
+                         filter(treatment == "water") %>%
+                         select(-treatment) %>% 
+                         column_to_rownames("isolate"),
+                       method = "euclidean",
+                       upper = T)) * 100) %>% as.matrix()
+```
+
+### Drought
+
+```{r}
+mantel.test(ani.mat, drought.mat)
+```
+
+### Water
+
+```{r}
+mantel.test(ani.mat,water.mat)
+```
+
+
+## ANI-DE 
+
+```{r}
+100-dist(de %>% column_to_rownames("isolate"), upper = T) %>% as.matrix()
+
+```
+
+
+<!-- # Pangenomic diversity -->
+
+<!-- ```{r} -->
+<!-- # function to calculate if each orthogroup is shared across any given pair of isolates -->
+<!-- pairwise_ogs <- function(x){ -->
+<!--   # If x is a vector (from apply), convert it to proper format -->
+<!--   if(is.vector(x)) { -->
+<!--     iso1 <- x[1] -->
+<!--     iso2 <- x[2] -->
+<!--   } else { -->
+<!--     # Original logic for data frame input -->
+<!--     iso1 <- x[,1] -->
+<!--     iso2 <- x[,2] -->
+<!--   } -->
+<!--   # make data long format -->
+<!--   df <- og %>% t() %>% as.data.frame() %>%  -->
+<!--     dplyr::select(iso1,iso2) %>%  -->
+<!--     rownames_to_column("OG") %>% -->
+<!--     dplyr::mutate(reference = iso1, query = iso2) -->
+
+<!--   # change  -->
+<!--   colnames(df) <- c("OG","count1","count2","reference","query") -->
+
+<!--   df <- df %>% -->
+<!--     mutate(shared = case_when(count1 > 0 & count2 > 0 ~ 1, -->
+<!--                               count1 == 0 | count2 == 0 ~ 0), -->
+<!--            count_diff = abs(count1-count2)) %>% -->
+<!--     dplyr::select(OG,reference,query,shared,count_diff) -->
+<!--   return(df) -->
+<!-- } -->
+
+<!-- # apply across all pairs of isolates in dataset (n=48) -->
+<!-- # and combine results into a single, tidy df -->
+<!-- pairs <- do.call(rbind, -->
+<!--                  apply(unique(ani$reference) %>% combn(., m = 2) %>% t() %>% as.data.frame(), -->
+<!--                        MARGIN = 1, -->
+<!--                        FUN = pairwise_ogs)) -->
+
+<!-- # now match it up with ANI data from fastANI -->
+<!-- shared <- left_join(pairs %>%  -->
+<!--                       group_by(reference, query) %>% -->
+<!--                       summarize(n_shared = sum(shared)), -->
+<!--                     pairs %>%  -->
+<!--                       group_by(reference, query) %>% -->
+<!--                       filter(shared == 0, count_diff > 0) %>%  -->
+<!--                       summarize(n_unshared = n()), -->
+<!--                     by = c("reference","query")) %>% -->
+<!--           left_join(ani, by = c("reference","query")) %>% -->
+<!--           mutate(Comparison = case_when(ANI > 99 ~ "Strain", -->
+<!--                                         ANI < 99 & ANI > 95 ~ "Species", -->
+<!--                                         ANI < 95 ~ "Genus")) -->
+<!-- ``` -->
+
+<!-- ## (Un-)Shared OG -->
+<!-- ```{r fig.width=3, fig.height=5} -->
+<!-- ## Boxplots -->
+<!-- rbind(# Within Strain -->
+<!--       shared %>% -->
+<!--         filter(ANI > 99) %>% -->
+<!--         mutate(Comparison = "Strain"), -->
+<!--       # Within-Species, but not within strain  -->
+<!--       shared %>% -->
+<!--         filter(ANI > 95 & ANI < 99) %>% -->
+<!--         mutate(Comparison = "Species"), -->
+<!--       # Within Genus, but not within species -->
+<!--       shared %>% -->
+<!--         filter(ANI < 95) %>% -->
+<!--         mutate(Comparison = "Genus")) %>% -->
+<!--   reshape2::melt(id.vars = c("reference","query","Comparison")) %>% -->
+<!--   filter(!variable == "ANI") %>% -->
+<!--   mutate(share = case_when(variable == "n_shared" ~ "Shared", -->
+<!--                            variable == "n_unshared" ~ "Unshared")) %>% -->
+<!--   ggplot(aes(x = Comparison, y = value, fill = Comparison)) + -->
+<!--     scale_fill_fb("lightspec") + -->
+<!--     geom_jitter(height = 0, width = 0.2, alpha = 0.4, show.legend = F) + -->
+<!--     geom_boxplot(outlier.shape = NA, show.legend = F) + -->
+<!--     facet_grid(rows = vars(share), scales = "free") + -->
+<!--     theme_bw() -->
+<!-- ``` -->
+<!-- ### Numbers -->
+<!-- ```{r} -->
+<!-- shared %>%  -->
+<!--   filter(Comparison %in% c("Strain")) %>%  -->
+<!--   .$n_unshared %>% summary() -->
+
+<!-- shared %>%  -->
+<!--   filter(Comparison %in% c("Species")) %>%  -->
+<!--   .$n_unshared %>% summary() -->
+<!-- shared %>%  -->
+<!--   filter(Comparison %in% c("Genus")) %>%  -->
+<!--   .$n_unshared %>% summary() -->
+
+<!-- shared %>%  -->
+<!--   filter(Comparison %in% c("Strain")) %>%  -->
+<!--   .$n_shared %>% summary() -->
+<!-- shared %>%  -->
+<!--   filter(Comparison %in% c("Species")) %>%  -->
+<!--   .$n_shared %>% summary() -->
+<!-- shared %>%  -->
+<!--   filter(Comparison %in% c("Genus")) %>%  -->
+<!--   .$n_shared %>% summary() -->
+<!-- ``` -->
+
+# PGLS
+
+## DE
+```{r}
+
+de.df <- read_tsv("../raw_data/colonization.tsv") %>% 
+  dplyr::mutate(de = `log2(Drought/Water)`) %>%
+  dplyr::select(isolate,de) %>% 
+  column_to_rownames("isolate")
+
+de <- de.df$de
+names(de) <- rownames(de.df)
+rm(de.df)
+
+tree <- read.tree("../analysis/gtotreeN/gtotreeN.tre")
+# root the tree first using MRCA from outgroup Nocardioides
+root_node <- phytools::findMRCA(tree=tree, tips=c("N_dokdonensis","N_humi"))
+tree <- reroot(tree, node.number=root_node)
+# Subset the phylogenetic tree to exclude tips without data
+tree <- drop.tip(phy = tree, tip=c("N_dokdonensis","N_humi"))
+
+# add small value to length 0 tree branches to prevent issues in the PGLS
+tree$edge.length[tree$edge.length == 0] <- 0.0000001
+
+# test for Pagel's Lambda
+phylosig(tree, de, method = "lambda", test = TRUE)
+# test for Blomberg's K
+phylosig(tree, de, method="K", test=TRUE)
+```
+
+## Biolog
+
+### Blomberg's K
+```{r}
+### Required Packages for Phylogenetic Signal Tests
+# Install packages if needed
+# install.packages(c("geomorph", "mvMORPH"))
+
+library(geomorph)    # For multivariate Blomberg's K
+library(phytools)    # For Pagel's Lambda and other comparative methods
+library(ape)         # For phylogenetic tree handling
+library(mvMORPH)     # For alternative multivariate methods
+
+#----------------------------------------------
+# PART 1: Setting up your data
+#----------------------------------------------
+
+# 1. Load your phylogenetic tree
+# # Example: Reading a tree from a Newick file
+# tree <- read.tree("your_tree_file.tre")
+# # Or using a sample tree for demonstration
+# tree <- rtree(10)  # Random tree with 10 tips for testing
+subtree <- keep.tip(tree, tip = rownames(biolog))
+
+# 2. Load your multivariate trait data
+# Example: Creating sample data for demonstration
+# In practice, you would load your own data
+species_names <- subtree$tip.label
+
+# traits <- matrix(rnorm(10*3), ncol=3)  # 10 species, 3 traits
+# rownames(traits) <- species_names
+# colnames(traits) <- c("trait1", "trait2", "trait3")
+
+# Optional - check that tree and data have the same species in the same order
+if(!identical(subtree$tip.label, rownames(biolog))) {
+  # Match data to tree order
+  biolog <- biolog[match(subtree$tip.label, rownames(biolog)),]
+}
+
+#----------------------------------------------
+# PART 2: Multivariate Blomberg's K (Kmult)
+#----------------------------------------------
+
+# Using the geomorph package implementation
+k_mult_result <- geomorph::physignal(as.matrix(biolog), subtree)
+summary(k_mult_result)
+# Interpretation of results:
+# - Kmult ≈ 0: No phylogenetic signal
+# - Kmult ≈ 1: Trait evolution follows Brownian motion
+# - Kmult > 1: Traits show stronger phylogenetic signal than expected under Brownian motion
+# - P-value < 0.05: Significant phylogenetic signal
+
+```
+
+
+### Pagel's λ
+```{r}
+
+# Option 1: Using mvMORPH package for multivariate Pagel's Lambda
+# First, fit a model with lambda=0 (no phylogenetic signal)
+model_lambda0 <- mvgls(as.matrix(biolog) ~ 1, 
+                       tree = subtree, 
+                       model = "lambda", 
+                       param = list(lambda=0))
+
+# Then, fit a model with lambda estimated from the data
+model_lambda <- mvgls(as.matrix(biolog) ~ 1, 
+                      tree = subtree, 
+                      model = "lambda")
+
+# Manual LRT calculation is more reliable
+LR <- -2 * (logLik(model_lambda0) - logLik(model_lambda))
+pvalue <- pchisq(LR, df=1, lower.tail=FALSE)
+
+# Create a result table similar to what LRT() would produce
+lrt_table <- data.frame(LogLik1 = logLik(model_lambda0),
+                        LogLik2 = logLik(model_lambda),
+                        df = 1,
+                        LRT = LR,
+                        pvalue = pvalue)
+print(lrt_table)
+```
+
+
+```{r}
+# Compare models to test for phylogenetic signal
+lambda_test <- anova(model_lambda0, model_lambda)
+print(lambda_test)
+
+# Get the estimated lambda value
+lambda_value <- model_lambda$param$lambda
+print(paste("Estimated Lambda:", lambda_value))
+
+# Option 2: For each trait separately using phytools
+# This isn't truly multivariate but can be useful for comparison
+lambda_results <- list()
+for(i in 1:ncol(traits)) {
+  lambda_results[[i]] <- phylosig(tree, traits[,i], method="lambda", test=TRUE)
+}
+names(lambda_results) <- colnames(traits)
+
+# Display results for each trait
+for(trait_name in names(lambda_results)) {
+  cat("\nTrait:", trait_name, "\n")
+  cat("Lambda:", lambda_results[[trait_name]]$lambda, "\n")
+  cat("P-value:", lambda_results[[trait_name]]$P, "\n")
+  cat("Log-likelihood:", lambda_results[[trait_name]]$logL, "\n")
+  cat("Log-likelihood (λ=0):", lambda_results[[trait_name]]$logL0, "\n")
+}
+
+```
+
+
+# Procrustes & Mantel
+
+```{r}
+# calculate distance matrices
+dist.biolog <- vegdist(scale(biolog), method = "euclidean", na.rm = T,diag = T,upper = T)
+
+dist.og <- vegdist(og %>% 
+                     rownames_to_column("isolate") %>%
+                     filter(isolate %in% rownames(biolog)) %>%
+                     column_to_rownames("isolate"),
+                   method = "bray", na.rm = T, diag= T, upper = T)
+
+dist.ani <- read_tsv("../analysis/fastani/fastani_many-to-many.tsv",
+                col_names = c("ref","query","ANI","x","y")) %>% 
+  select(-x,-y) %>% 
+  mutate(ref = gsub("raw_data/fna/","",ref),
+         ref = gsub(".fna","",ref),
+         query = gsub("raw_data/fna/","",query),
+         query = gsub(".fna","",query)) %>%
+  filter(query %in% rownames(biolog),
+         ref %in% rownames(biolog)) %>%
+  reshape2::dcast(ref ~ query) %>%
+  column_to_rownames("ref") %>% 
+  as.matrix()
+
+dist.ani <- as.dist((100-dist.ani)/100, diag = T, upper = T)
+
+dist.tree <- as.dist(cophenetic.phylo(keep.tip(tree, tip = rownames(biolog))),
+                     diag = T, upper = T)
+```
+
+## Biolog
+
+```{r}
+corr.tree_biolog <- proc_mantel_plot(dist.tree, dist.biolog, "Tree", "Biolog")
+corr.ani_biolog <- proc_mantel_plot(dist.ani, dist.biolog, "ANI", "Biolog")
+corr.og_biolog <- proc_mantel_plot(dist.og, dist.biolog, "OG", "Biolog")
+```
+
+```{r fig.width=12, fig.height=4}
+(corr.tree_biolog$figure + corr.ani_biolog$figure + corr.og_biolog$figure) + 
+  plot_layout(guides = "collect", axis_titles = "collect")
+```
+
+## Genomic
+
+```{r fig.width=12, fig.height=4}
+(proc_mantel_plot(dist.ani, dist.og, "ANI", "OG")$figure +
+   proc_mantel_plot(dist.tree, dist.og, "Tree", "OG")$figure +
+   proc_mantel_plot(dist.tree, dist.ani, "Tree", "ANI")$figure) +
+  plot_layout(guides = "collect", axis_titles = "collect")
+```
+
+ ## DE & OGs
+
+```{r}
+de.df <- read_tsv("../raw_data/colonization.tsv") %>% 
+  dplyr::mutate(de = `log2(Drought/Water)`) %>%
+  dplyr::select(isolate,de) %>% 
+  column_to_rownames("isolate")
+
+de <- de.df$de
+names(de) <- rownames(de.df)
+rm(de.df)
+
+dist.de.all <- vegdist(as.data.frame(de), method = "euclidean", upper = T, diag = T)
+
+dist.og.all <- vegdist(og, method = "bray", na.rm = T, diag= T, upper = T)
+
+proc_mantel_plot(dist.de.all,dist.og.all,"DE","OG")
+```
+
