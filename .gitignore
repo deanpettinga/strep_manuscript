@@ -12,6 +12,6 @@
 
 # epicon_field_16S_illumina/*
 # epicon_field_16S_pacbio/*
-metabolomics/*
+metabolomics/raw_data/*
 microbox/*
 pangenome/*
