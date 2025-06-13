@@ -1,0 +1,289 @@
+---
+title: "plant-biomass"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+author: "Dean Pettinga"
+output:
+  html_document:
+    code_folding: hide
+    self_contained: yes
+    toc: TRUE
+    toc_depth: 5
+    toc_float:
+      collapsed: TRUE
+      smooth_scroll: TRUE
+    number_sections: TRUE
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(reshape2)
+# devtools::install_github(“km4htc/farrowandball”)
+library(farrowandball)
+# devtools::install_github("thomasp85/patchwork")
+library(patchwork)
+```
+
+# Import Data
+
+```{r}
+phene <- read_xlsx("../raw_data/plant-phenotypes.xlsx") %>%
+  mutate(pwc = ((shoot_freshweight_g-shoot_dryweight_g)/shoot_freshweight_g)*100) %>%
+  select(-percent_water_content) %>%
+  melt(id.vars = c("sample","isolate","treatment","replicate","ANI_group","biolog","microbox_batch")) %>%
+  filter(!is.na(value))
+
+phene.mean <- phene %>% 
+  group_by(isolate,treatment,variable) %>%
+  summarize(value = mean(value)) %>%
+  left_join(phene %>% select(isolate,biolog) %>% unique(), by = "isolate")
+
+Mock_D_FW <- phene.mean %>% filter(isolate == "Mock", treatment == "drought", variable == "shoot_freshweight_g") %>% .$value
+Mock_D_DW  <- phene.mean %>% filter(isolate == "Mock", treatment == "drought", variable == "shoot_dryweight_g") %>% .$value
+Mock_D_PWC <- phene.mean %>% filter(isolate == "Mock", treatment == "drought", variable == "pwc") %>% .$value
+Mock_W_FW <- phene.mean %>% filter(isolate == "Mock", treatment == "water", variable == "shoot_freshweight_g") %>% .$value
+Mock_W_DW <- phene.mean %>% filter(isolate == "Mock", treatment == "water", variable == "shoot_dryweight_g") %>% .$value
+Mock_W_PWC <- phene.mean %>% filter(isolate == "Mock", treatment == "water", variable == "pwc") %>% .$value
+
+phene.mean <- phene.mean %>%
+  mutate(value_delta = case_when((treatment == "drought" & variable == "shoot_freshweight_g") ~ (value - Mock_D_FW),
+                                 (treatment == "drought" & variable == "shoot_dryweight_g") ~ (value - Mock_D_DW),
+                                 (treatment == "drought" & variable == "pwc") ~ (value - Mock_D_PWC),
+                                 (treatment == "water" & variable == "shoot_freshweight_g") ~ (value - Mock_W_FW),
+                                 (treatment == "water" & variable == "shoot_dryweight_g") ~ (value - Mock_W_DW),
+                                 (treatment == "water" & variable == "pwc") ~ (value - Mock_W_PWC))) %>%
+  select(isolate,treatment,biolog,variable,value,value_delta)
+
+phene.rel <- ungroup(phene) %>% select(isolate) %>% unique()
+for (var in unique(phene$variable)){
+  # calculate means and subset the tibble
+  # for var of interest and calculate ratio
+  tmp <- phene %>% 
+    group_by(isolate,treatment,variable) %>%
+    select(isolate,treatment,variable,value) %>%
+    summarize(value = mean(value)) %>%
+    filter(variable == var) %>%
+    dcast(isolate ~ treatment) %>%
+    mutate(ratio = drought/water)
+  
+  # now set the baseline mock value
+  mock.ratio <- tmp %>% filter(isolate == "Mock") %>% .$ratio
+  
+  # now calculate a score relative to "mock"
+  # where positive values are better than "mock"
+  tmp <- tmp %>% 
+    mutate(log2ratio = log2(ratio/mock.ratio)) %>%
+    # now select just this value 
+    select(isolate,log2ratio)
+  
+  # rename columns
+  colnames(tmp) <- c("isolate",paste0(paste0(var,"_diffRelMock")))
+  # now add to phene.rel
+  phene.rel <- phene.rel %>%
+    left_join(tmp, by = "isolate")
+}
+
+``` 
+
+# Figures
+
+```{r functions}
+
+fig <- function(DATA, DATA.MEAN, BIOLOG, TRT, PHENE, Y.LAB, XLAB.TF, ORDER.PHENE, ORDER.TRT){
+  
+  mock <- DATA.MEAN %>%
+    filter(isolate == "Mock",
+           variable == PHENE) %>%
+    select(-variable) %>%
+    dcast(isolate ~ treatment) 
+  
+  DATA %>% 
+    filter(treatment == TRT,
+           variable == PHENE,
+           biolog %in% BIOLOG,
+           !is.na(value),
+           !isolate == "Mock") %>%
+    mutate(isolate = factor(isolate,
+                            levels = DATA.MEAN %>% 
+                              filter(variable == ORDER.PHENE, 
+                                     treatment == ORDER.TRT,
+                                     biolog %in% BIOLOG) %>%
+                              arrange(-value) %>% .$isolate)) %>%
+    ggplot(., aes(x = isolate, y = value)) +
+      {if(TRT == "drought"){scale_fill_fb("spec", rev = T) 
+          } else {scale_fill_fb("spec", rev = F)}} +
+      {if(TRT == "drought"){scale_color_fb("spec", rev = T)
+          } else {scale_color_fb("spec", rev = F)}} +
+      {if(TRT == "drought"){geom_hline(yintercept = mock$drought, linetype = "dashed")
+          } else {geom_hline(yintercept = mock$water, linetype = "dashed")}} +
+      geom_point(size = 1.5, aes(color = treatment)) +
+      geom_point(data = DATA.MEAN %>% 
+                                filter(variable == PHENE,
+                                       treatment == TRT,
+                                       biolog %in% BIOLOG,
+                                       !is.na(value),
+                                       !isolate == "Mock"),
+                 size = 4, shape = 21, stroke = 1.05, aes(fill = treatment)) +
+      theme_bw() +
+      {if(XLAB.TF){
+        theme(axis.text.x = element_text(angle=270, vjust = 0.5),
+              axis.title.x = element_blank())
+      } else {theme(axis.text.x = element_blank(),
+                    axis.title.x = element_blank())}} +
+      ylab(Y.LAB)
+}
+
+fig.rel <- function(PHENE.MEAN,VAR,YLAB){
+  
+  mock <- PHENE.MEAN %>%
+    filter(isolate == "Mock",
+           variable == VAR) %>%
+    select(-variable) %>%
+    dcast(isolate ~ treatment) %>%
+    mutate(delta = drought/water,
+           isolate = fct_reorder(isolate, -delta)) %>%
+    .$delta
+
+  PHENE.MEAN %>%
+    filter(variable == VAR,
+           !isolate == "Mock") %>%
+    select(-variable) %>%
+    dcast(isolate ~ treatment) %>%
+    mutate(delta = drought/water,
+           isolate = fct_reorder(isolate, -delta)) %>%
+    ggplot(aes(x = isolate, y = delta, fill = VAR)) +
+      scale_fill_manual(values = c("")) +
+      geom_hline(yintercept = mock, linetype = "dashed") +
+      geom_point(shape = 21, size = 4, stroke = 1.5) +
+      theme_bw() +
+      theme(axis.text.x = element_text(angle=270, vjust = 0.5)) +
+      ylab(YLAB) +
+      facet_grid(rows = vars(VAR))
+}
+
+# unique(phene.mean$variable)
+# 
+# (fig.rel(phene.mean,"shoot_dryweight_g", YLAB = "(Drought/Water)")) /
+# fig.rel(phene.mean,"shoot_freshweight_g", YLAB = "(Drought/Water)") +
+#   plot_layout(axes = "collect", guides = "collect")
+```
+
+
+```{r dry weight}
+(fig(phene, phene.mean, c("yes"), "drought", "shoot_dryweight_g","Dry Weight (g)", F, "shoot_dryweight_g", "drought") + 
+  ggtitle("Biolog Phenotyped Isolates")) /
+fig(phene, phene.mean, c("yes"), "water", "shoot_dryweight_g", "Dry Weight (g)", T, "shoot_dryweight_g", "drought") +
+  plot_layout(axes = "collect", guides = "collect")
+
+(fig(phene, phene.mean, c("yes","no"), "drought", "shoot_dryweight_g","Dry Weight (g)", F, "shoot_dryweight_g", "drought") + 
+  ggtitle("All Isolates")) /
+fig(phene, phene.mean, c("yes","no"), "water", "shoot_dryweight_g", "Dry Weight (g)", T, "shoot_dryweight_g", "drought") +
+  plot_layout(axes = "collect", guides = "collect")
+```
+
+```{r fresh weight}
+(fig(phene, phene.mean, c("yes"), "drought", "shoot_freshweight_g","Fresh Weight (g)", F, "shoot_freshweight_g", "drought") + 
+  ggtitle("Biolog Phenotyped Isolates")) /
+fig(phene, phene.mean, c("yes"), "water", "shoot_freshweight_g", "Fresh Weight (g)", T, "shoot_freshweight_g", "drought") + 
+  plot_layout(axes = "collect", guides = "collect")
+
+(fig(phene, phene.mean, c("yes","no"), "drought", "shoot_freshweight_g","Fresh Weight (g)", F, "shoot_freshweight_g", "drought") + 
+  ggtitle("All Isolates")) /
+fig(phene, phene.mean, c("yes","no"), "water", "shoot_freshweight_g", "Fresh Weight (g)", T, "shoot_freshweight_g", "drought") + 
+  plot_layout(axes = "collect", guides = "collect")
+```
+
+
+
+```{r percent water}
+(fig(phene, phene.mean, c("yes"), "drought", "pwc", "Water Content (%)", F, "pwc", "drought") + 
+  ggtitle("Biolog Phenotyped Isolates")) /
+fig(phene, phene.mean, c("yes"), "water", "pwc", "Water Content (%)", T, "pwc", "drought") + 
+  plot_layout(axes = "collect", guides = "collect") # & theme(legend.position = 'bottom')
+
+(fig(phene, phene.mean, c("yes","no"), "drought", "pwc", "Water Content (%)", F, "pwc", "drought") + 
+  ggtitle("All Isolates")) /
+fig(phene, phene.mean, c("yes","no"), "water", "pwc", "Water Content (%)", T, "pwc", "drought") + 
+  plot_layout(axes = "collect", guides = "collect") # & theme(legend.position = 'bottom')
+```
+```{r}
+delta <- function(PHENE.MEAN,VAR,TITLE){
+  PHENE.MEAN %>%
+  filter(isolate != "Mock",
+         variable == VAR) %>%
+  mutate(effect = case_when(value_delta > 0 ~ "Positive",
+                            value_delta < 0 ~ "Negative")) %>%
+  mutate(isolate = factor(isolate,
+                            levels = PHENE.MEAN %>% 
+                              filter(variable == VAR, 
+                                     treatment == "drought") %>%
+                              arrange(-value) %>% .$isolate)) %>%
+ggplot(aes(x = isolate, y = value_delta)) +
+  scale_fill_fb("spec", rev = T) +
+  scale_color_manual(values = c("no" = "gray", "yes" = "black")) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_point(size = 4, shape = 21, stroke = 1.05, 
+             aes(fill = treatment, color = biolog)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle=270, vjust = 0.5),
+              axis.title.x = element_blank()) +
+  facet_grid(cols = vars(effect), rows = vars(treatment), scales = "free") +
+  ggtitle(TITLE)
+}
+```
+
+```{r delta, fig.width=12, fig.height=8}
+delta(phene.mean, "pwc", "% Water Content")
+delta(phene.mean, "shoot_freshweight_g", "Shoot Dry Weight (g)")
+delta(phene.mean, "shoot_dryweight_g", "Shoot Fresh Weight (g)")
+
+```
+
+# Test vs Mock
+
+```{r}
+run_t <- function(ISOLATE, VARIABLE, TREATMENT){
+  
+  res = t.test(x = phene %>% filter(variable == VARIABLE, isolate == "Mock", treatment == TREATMENT) %>% .$value,
+               y = phene %>% filter(variable == VARIABLE, isolate == ISOLATE, treatment == TREATMENT) %>% .$value,
+               alternative = "two.sided",
+               paired = F,
+               var.equal = F)
+  return(c(isolate = ISOLATE, variable = VARIABLE, treatment = TREATMENT, method = res$method, p = as.numeric(res$p.value)))
+}
+
+phene.test <- rbind(do.call(rbind,lapply(unique(phene$isolate), function(x) run_t(x,"shoot_dryweight_g","water"))),
+      do.call(rbind,lapply(unique(phene$isolate), function(x) run_t(x,"shoot_dryweight_g","drought"))),
+      do.call(rbind,lapply(unique(phene$isolate), function(x) run_t(x,"pwc","water"))),
+      do.call(rbind,lapply(unique(phene$isolate), function(x) run_t(x,"pwc","drought"))),
+      do.call(rbind,lapply(unique(phene$isolate), function(x) run_t(x,"shoot_freshweight_g","water"))),
+      do.call(rbind,lapply(unique(phene$isolate), function(x) run_t(x,"shoot_freshweight_g","drought")))) %>% 
+  as_tibble() %>%
+  mutate(p = as.numeric(p)) %>%
+  filter(!isolate == "Mock") %>%
+  group_by(variable,treatment) %>%
+  mutate(FDR = p.adjust(p,method = "BH"))
+
+```
+
+
+# Deliverables
+
+```{r}
+write_tsv(phene, file = "../deliverables/microbox-plant-phenes.tsv")
+write_tsv(phene.mean, file = "../deliverables/microbox-plant-phenes_mean.tsv")
+write_tsv(phene.test, file = "../deliverables/microbox-plant-phenes_test.tsv")
+```
+
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+

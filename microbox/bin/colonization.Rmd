@@ -1,0 +1,203 @@
+---
+title: "colonization"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+author: "Dean Pettinga"
+output:
+  html_document:
+    code_folding: hide
+    self_contained: yes
+    toc: TRUE
+    toc_depth: 5
+    toc_float:
+      collapsed: TRUE
+      smooth_scroll: TRUE
+    number_sections: TRUE
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries}
+library(readxl)
+library(tidyverse)
+library(tidymodels)
+library(farrowandball)
+library(ggpmisc)
+library(patchwork)
+library(reshape2)
+
+theme_set(theme_bw() + 
+            theme(panel.grid.major = element_blank(), 
+                  panel.grid.minor = element_blank()))
+```
+
+```{r import_data}
+# qPCR data
+res <- read_tsv("../raw_data/qPCR.tsv") %>%
+  filter(!is.na(colonization),
+         !is.na(Cq)) %>%
+  mutate(isolate = factor(isolate),
+         treatment = factor(treatment),
+         bio_rep = factor(bio_rep),
+         tech_rep = factor(tech_rep),
+         colonization = as.numeric(colonization)) %>%
+  group_by(sample)
+
+# calculate DE scores for each isolate in new tibble
+res.DE <- res %>% 
+  # average the technical reps
+  group_by(isolate, treatment, bio_rep) %>%
+  summarise(colonization = mean(colonization)) %>%
+  # get the average for each isolate-treatment group
+  summarise(mean_col = mean(colonization)) %>%
+  # now reorder the df
+  reshape2::dcast(isolate ~ treatment, value.var = "mean_col") %>%
+  rename(mean_col.water = water,
+         mean_col.drought = drought) %>%
+  # calculate relative drought enrichment
+  # and classify as Water- or Drought-Enriched
+  mutate(`log2(Drought/Water)` = log2(mean_col.drought / mean_col.water),
+         Enrichment = ifelse(`log2(Drought/Water)` > 0, "Drought", "Water"),
+         isolate = reorder(isolate, `log2(Drought/Water)`, decreasing = T)) %>%
+  # now add a column for the mean colonization ACROSS both treatments
+  left_join(res %>%
+              group_by(isolate) %>%
+              summarise(mean_col = mean(colonization)),
+            by = "isolate") %>%
+  # add ANI group and whether or not the isolate was phenotyped by biolog assay
+  left_join(res %>% ungroup() %>% select(isolate, ANI_group, biolog) %>% unique(), by = "isolate") %>%
+  # reorder the columns
+  select(isolate, ANI_group, biolog, mean_col, mean_col.drought, mean_col.water, `log2(Drought/Water)`, Enrichment)
+  
+# order isolate column as.factor() using mean colonization across treatments
+res.DE <- res.DE %>%
+  mutate(isolate = factor(isolate, levels = res.DE %>% arrange(-mean_col) %>% .$isolate)) 
+
+# import plant phenotypes
+phene <- read_xlsx("../raw_data/plant-phenotypes.xlsx") %>%
+  mutate(pwc = ((shoot_freshweight_g-shoot_dryweight_g)/shoot_freshweight_g)*100) %>%
+  melt(id.vars = c("sample","isolate","treatment","replicate","ANI_group","microbox_batch","biolog"))
+
+# make new df with plant phenotype means for each isolate
+phene.mean <- phene %>% 
+  group_by(isolate,treatment,variable) %>%
+  summarize(value = mean(value))
+```
+
+# Colonization
+
+## Bar
+
+```{r fig.width=12}
+## Enrichment Score
+plot.enrich <- res.DE %>%
+  filter(!isolate == "Mock") %>%
+  # re-factor isolate by Enrichment Score
+  mutate(isolate = factor(isolate, 
+                          levels=res.DE[order(res.DE$`log2(Drought/Water)`,decreasing = T),]$isolate)) %>% 
+  ggplot(aes(x = isolate, y = `log2(Drought/Water)`, fill = `log2(Drought/Water)`)) +
+  scale_colour_gradient2(low = "#5d82a1", mid = "white", high = "#a53c49", midpoint = 0, aesthetics = "fill") +
+  # scale_fill_fb("spec", reverse = T) +
+  geom_col(color = "black") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 270, vjust = 0.5)) +
+  ggtitle("Enrichment Scores")
+
+plot.enrich
+
+res.DE %>%
+  filter(!isolate == "Mock") %>%
+  # re-factor isolate by Enrichment Score
+  mutate(isolate = factor(isolate, 
+                          levels=res.DE[order(res.DE$`log2(Drought/Water)`,decreasing = T),]$isolate)) %>% 
+  ggplot(aes(x = isolate, y = `log2(Drought/Water)`, fill = `log2(Drought/Water)`, color = biolog)) +
+  scale_color_manual(values = c("no" = "gray", "yes" = "black")) +
+  scale_colour_gradient2(low = "#5d82a1", mid = "white", high = "#a53c49", midpoint = 0, aesthetics = "fill") +
+  # scale_fill_fb("spec", reverse = T) +
+  geom_col() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 270, vjust = 0.5)) +
+  ggtitle("Enrichment Scores")
+
+```
+
+
+## MA
+
+```{r}
+## Scatter
+plot.MA <- res.DE %>%
+  filter(!isolate == "Mock") %>%
+  # re-factor isolate by Enrichment Score
+  mutate(isolate = factor(isolate, 
+                          levels=res.DE[order(res.DE$`log2(Drought/Water)`,decreasing = T),]$isolate)) %>% 
+  ggplot(aes(x = mean_col, y = `log2(Drought/Water)`, fill = `log2(Drought/Water)`)) +
+  scale_colour_gradient2(low = "#5d82a1", mid = "white", high = "#a53c49", midpoint = 0, aesthetics = "fill") +
+  # scale_fill_fb("spec", reverse = T) +
+  geom_point(shape = 21, color = "black", size = 5, stroke = 1.1) + 
+  theme_bw() +
+  xlab("Mean Colonization") +
+  ggtitle("Enrichment Scores")
+
+plot.MA
+```
+
+## Scatter
+
+```{r}
+
+res.water <- res %>% 
+  filter(!isolate == "Mock",
+         treatment == "water") %>%
+  group_by(isolate, treatment, bio_rep) %>%
+  # average the technical reps
+  summarise(colonization = mean(colonization)) %>%
+  # re-factor isolate by  abundance
+  mutate(isolate = factor(isolate,
+                          levels = levels(res.DE$isolate)))
+
+res.drought <- res %>% 
+  filter(!isolate == "Mock",
+         treatment == "drought") %>%
+  group_by(isolate, treatment, bio_rep) %>%
+  # average the technical reps
+  summarise(colonization = mean(colonization)) %>%
+  # re-factor isolate by  abundance
+  mutate(isolate = factor(isolate,
+                          levels = res.DE[order(res.DE$`log2(Drought/Water)`,decreasing = T),] %>% .$isolate))
+
+# Plot
+ggplot(data = res.DE, aes(x = isolate, y = colonization)) +
+  geom_point(data = res.water, color = "#5d82a1") +
+  geom_point(data = res.drought, color = "#B57D8F") +
+  geom_point(data = res.DE %>% filter(!isolate == "Mock"),
+             shape = 21, size = 3, stroke = 1, fill = "#5d82a1", aes(x = isolate, y = mean_col.water)) +
+  geom_point(data = res.DE %>% filter(!isolate == "Mock"),
+             shape = 21, size = 3, stroke = 1, fill = "#B57D8F", aes(x = isolate, y = mean_col.drought)) +
+  # ylab("Isolate DNA (ng/uL)") +
+  scale_y_log10(breaks = scales::trans_breaks("log10", function(x) 10^x),
+                labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  theme_bw() +
+  annotation_logticks(sides = 'lr') + 
+  theme(axis.text.x = element_text(angle = 270, vjust = 0.5)) +
+  ylab("16S ng/uL per Extract ng/uL") +
+  ggtitle("Colonization")
+
+
+
+```
+
+# Deliverables
+
+```{r}
+write_tsv(res.DE %>% filter(!isolate == "Mock"), "../../deliverables/colonization.tsv")
+```
+
+# SessionInfo
+
+```{r}
+sessionInfo()
+```
+
