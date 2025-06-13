@@ -1,0 +1,222 @@
+---
+title: "Figure 5"
+output: html_document
+date: "2025-05-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.height=8,
+                      fig.width=10)
+```
+
+# Libraries
+
+```{r}
+library(tidyverse)
+library(reshape2)
+library(ggcorrplot)
+library(farrowandball)
+library(ggtree)
+library(ggtreeExtra)
+library(ape)
+```
+
+# Import
+
+```{r}
+meta <- read_tsv("genome_metadata.tsv")
+
+col <- read_tsv("../../raw_data/colonization.tsv") %>%
+  dplyr::filter(isolate != "Mock") %>%
+  dplyr::mutate(Enrichment_abs = abs(`log2(Drought/Water)`))  %>%
+  rename(DE = `log2(Drought/Water)`) %>%
+  left_join(meta %>% select(isolate,code_dc))
+
+plant <- read_tsv("../../raw_data/microbox-plant-phenes_mean.tsv") %>%
+  dplyr::filter(!isolate == "Mock") %>%
+  left_join(read_tsv("../../raw_data/microbox-plant-phenes_test.tsv"), by = c("isolate","variable","treatment")) %>% 
+  filter(variable == "shoot_dryweight_g") %>% 
+  select(-biolog) %>% 
+  mutate(Significance = ifelse(FDR<0.05,"FDR<0.05","NS")) %>%
+  left_join(meta %>% select(isolate,code_dc))
+
+# read tree data
+nwk <- read.tree("gtotreeN_wDC.tre") 
+
+# find MRCA of outgroup
+mrca <- MRCA(nwk, .node1 = "N_dokdonensis", .node2 = "N_humi")
+
+# root with outgroup
+tree <- nwk %>% root(., outgroup =  c("N_dokdonensis","N_humi"), resolve.root = T)
+
+# define outgroup as a grouped clade for formatting
+tree <- groupClade(tree, mrca)
+
+# manipulate root edge length to make visualization more compact
+tree$edge.length[1] <- 0.04
+```
+
+# DE stats
+
+# Input
+
+```{r fig.width=14, message=FALSE, warning=FALSE}
+qpcr <- read_tsv("qPCR_results.tsv", show_col_types = F) %>%
+  dplyr::select(isolate,treatment,bio_rep,tech_rep,Cq,SQ,input_nguL,colonization) %>%
+  # get mean of technical reps
+  group_by(isolate,treatment,bio_rep) %>%
+  summarize(col = mean(colonization)) %>%
+  filter(!is.na(col))
+
+qpcr.mean <- qpcr %>%
+  left_join(meta, by = "isolate") %>%
+  filter(!isolate == "Mock") %>%
+  group_by(isolate,treatment) %>%
+  summarize(col = mean(col)) %>%
+  reshape2::dcast(isolate ~ treatment, value.var = "col") %>%
+  mutate(DE = log2(drought/water))
+
+qpcr.mean <- qpcr.mean %>%
+  mutate(isolate = factor(isolate, levels=qpcr.mean %>% arrange(DE) %>% .$isolate))
+```
+
+
+```{r fig.width=14, message=FALSE, warning=FALSE}
+qpcr.test <- qpcr %>%
+  group_by(isolate, treatment) %>% select(-bio_rep) %>%
+  tidyr::nest(data = c(treatment,col)) %>%
+  mutate(var_result = purrr::map(data, function(df){
+    # Extract the data for each treatment
+    water_data <- df %>% filter(treatment == "water") %>% pull(col)
+    drought_data <- df %>% filter(treatment == "drought") %>% pull(col)
+    # Run the t-test
+    var.test(water_data,drought_data)})) %>%
+  mutate(tidy_var = purrr::map(var_result, broom::tidy)) %>%
+  unnest(tidy_var) %>%
+  rename(equal_var_p = p.value) %>%
+  select(isolate,equal_var_p) %>%
+  mutate(test = ifelse(equal_var_p < 0.05,"welch","t-test")) %>%
+  filter(isolate !="Mock") %>%
+```
+
+# Statistics
+
+```{r}
+de <- rbind(
+  # t.tests
+  qpcr %>%
+    select(-bio_rep) %>%
+    filter(isolate %in% (qpcr.test %>% filter(test == "t-test") %>% .$isolate)) %>%
+    group_by(treatment) %>%
+    tidyr::nest(data = c(treatment,col)) %>%
+    mutate(t_test = purrr::map(data, function(df){
+      # Extract the data for each treatment
+      water_data <- df %>% filter(treatment == "water") %>% pull(col)
+      drought_data <- df %>% filter(treatment == "drought") %>% pull(col)
+      # Run the t-test
+      t.test(water_data, drought_data, 
+             alternative = "two.sided",
+             var.equal = TRUE, paired = FALSE)})) %>%
+    mutate(tidy_t = purrr::map(t_test, broom::tidy)) %>%
+    unnest(tidy_t) %>%
+    dplyr::select(isolate,p.value) %>%
+    mutate(test = "t.test"),
+  # Welch's t-tests
+  qpcr %>%
+    select(-bio_rep) %>%
+    filter(isolate %in% (qpcr.test %>% filter(test == "welch") %>% .$isolate)) %>%
+    group_by(treatment) %>%
+    tidyr::nest(data = c(treatment,col)) %>%
+    mutate(welch = purrr::map(data, function(df){
+      # Extract the data for each treatment
+      water_data <- df %>% filter(treatment == "water") %>% pull(col)
+      drought_data <- df %>% filter(treatment == "drought") %>% pull(col)
+      # Run the t-test
+      t.test(water_data, drought_data, 
+             alternative = "two.sided",
+             var.equal = FALSE, paired = FALSE)})) %>%
+    mutate(tidy_welch = purrr::map(welch, broom::tidy)) %>%
+    unnest(tidy_welch) %>%
+    dplyr::select(isolate,p.value) %>%
+    mutate(test = "welch")
+) %>%
+  mutate(p.adj = p.adjust(p.value, method = "BH"),
+         Significance = ifelse(p.adj < 0.05, "FDR<0.05","NS")) %>%
+  left_join(meta %>% select(isolate,code_dc), by = "isolate") %>%
+  left_join(col %>% select(isolate,DE), by = "isolate")
+
+```
+
+# ggtree
+
+```{r fig.height=8, fig.width=5}
+
+ggtree(tree, aes(linetype = group)) + 
+  scale_linetype_manual(values = c("0" = "dotted", "1" = "solid")) +
+  geom_tiplab(size = 3, offset = 0.0025, align=T, linetype = NA) +
+  # AC Groups
+  scale_color_manual(values = c("AC2"="#9A44F7",
+                                "AC5"="#489DF9",
+                                "AC6"="#CECB9E",
+                                "AC8"="#5F9841"), name = "AC Group") +
+  geom_fruit(geom = geom_point,
+             mapping = aes(y = code_dc,
+                           x = 1,
+                           color = ac_group),
+             shape = 19,
+             size = 3.5,
+             offset = 0.25,
+             pwidth = 0.01125,
+             data = meta %>% filter(!is.na(ac_group))) +
+  # DE
+  ggnewscale::new_scale_fill() +
+  scale_fill_steps2(low = "#599ec4",mid = "white", high="#AF344D", midpoint = 0,) +
+  ggnewscale::new_scale_color() +
+  scale_color_manual(values = c("NS"="white","FDR<0.05"="black")) +
+  geom_fruit(geom = geom_tile,
+             mapping = aes(y = code_dc,
+                           # x = variable,
+                           fill = DE,
+                           color = Significance),
+             height = 0.8,
+             size = 0.5,
+             offset = 0.085,
+             pwidth = 0.01125,
+             data = de) +
+  # Water Biomass
+  ggnewscale::new_scale_fill() +
+  # scale_fill_steps2(low = "#543005",mid = "white", high="#00441b", midpoint = 0) +
+  scale_fill_stepsn(name = "∆ Biomass (g)", 
+                    colors =c("#8c510a","#bf812d","#a6dba0","#1b7837","#00441b"),
+                    breaks = c(-0.05, 0, 0.05, 0.1),
+                    # limits = c(-0.1, 0.2),
+                    values = scales::rescale(c(-0.05, 0, 0.05, 0.1))
+                    ) +
+  geom_fruit(geom = geom_tile,
+             mapping = aes(y = code_dc,
+                           x = variable,
+                           fill = value_delta,
+                           color = Significance),
+             height = 0.8,
+             size = 0.5,
+             offset = 0.045,
+             pwidth = 0.01125,
+             data = plant %>% filter(treatment == "water",
+                                     variable == "shoot_dryweight_g")) +
+  # Drought Biomass
+  geom_fruit(geom = geom_tile,
+             mapping = aes(y = code_dc,
+                           x = variable,
+                           fill = value_delta,
+                           color = Significance),
+             height = 0.8,
+             size = 0.5,
+             offset = 0.045,
+             pwidth = 0.01125,
+             data = plant %>% filter(treatment == "drought",
+                                     variable == "shoot_dryweight_g")) +
+  coord_fixed(ratio = 0.0125) +
+  theme(legend.position = "right")
+```
+

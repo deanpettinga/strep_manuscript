@@ -1,0 +1,137 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-11-11"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.height=8,
+                      fig.width=10)
+```
+
+Libraries
+
+```{r}
+library(tidyverse)
+library(reshape2)
+library(farrowandball)
+library(ggtree)
+library(ggtreeExtra)
+library(ape)
+```
+
+# functions
+
+```{r}
+reorder_cormat <- function(cormat){
+# Use correlation between variables as distance
+dd <- as.dist((1-cormat)/2)
+hc <- hclust(dd)
+cormat <-cormat[hc$order, hc$order]
+}
+
+plot_ani <- function(ani.tib){
+  df <- dcast(ani.tib, query ~ ref, value.var = "ANI") %>% 
+    as.data.frame() %>% 
+    column_to_rownames("query") %>%
+    as.matrix() %>%
+    reorder_cormat() %>%
+    melt(varnames = c("query","ref"), value.name = "ANI") %>%
+    mutate(Strain = ifelse(ANI > 98.8,"Y","N"),
+           ANI_round = round(ANI,digits = 0))
+    
+  
+  ggplot(df, aes(x = query, y = ref, fill = ANI, color = Strain, label = ANI_round)) +
+    # scale_fill_distiller(palette = "Purples", direction = 1) +
+    scale_fill_fb("daylong",discrete = F) +
+    scale_color_manual(values = c("Y" = "black","N" = "white"), guide = F) +
+    geom_tile(data = df %>% filter(Strain == "N")) +
+    geom_tile(data = df %>% filter(Strain == "Y"), size = 1.0125) +
+    theme_minimal() + 
+    theme(axis.text.x = element_text(angle = 270, vjust = 0.5, hjust = 1),
+          panel.grid.major = element_blank(),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank()) +
+    coord_fixed() 
+}
+
+```
+
+# input
+
+## metadata
+```{r}
+meta <- read_tsv("genome_metadata.tsv", show_col_types = F) %>%
+  mutate(name = code_dc) %>%
+  select(isolate, name, ac_group)
+```
+
+## tree
+```{r}
+# read tree data
+nwk <- read.tree("gtotreeN_wDC.tre") 
+
+# find MRCA of outgroup
+mrca <- MRCA(nwk, .node1 = "N_dokdonensis", .node2 = "N_humi")
+
+# root with outgroup
+tree <- nwk %>% root(., outgroup =  c("N_dokdonensis","N_humi"), resolve.root = T)
+
+# define outgroup as a grouped clade for formatting
+tree <- groupClade(tree, mrca)
+
+# manipulate root edge length to make visualization more compact
+tree$edge.length[1] <- 0.04
+```
+
+## ani
+```{r}
+ani <- read_tsv("../../analysis/fastani/fastani_many-to-many.tsv",
+                col_names = c("ref","query","ANI","x","y")) %>% 
+  dplyr::select(-x,-y) %>% 
+  dplyr::mutate(ref = gsub("raw_data/fna/","",ref),
+                ref = gsub(".fna","",ref),
+                query = gsub("raw_data/fna/","",query),
+                query = gsub(".fna","",query)) %>%
+  # now change ref/query to include DC annotations
+  left_join(meta %>% select(isolate,name) %>% rename(query = isolate, query_name = name)) %>%
+  left_join(meta %>% select(isolate,name) %>% rename(ref = isolate, ref_name = name)) %>%
+  dplyr::select(query_name,ref_name,ANI)
+  
+```
+
+# figure
+```{r fig.height=6, fig.width=10}
+ani.dcast <- reshape2::dcast(ani, formula = ref_name ~ query_name) %>% 
+  rename("isolate" = "ref_name") %>% 
+  column_to_rownames("isolate")
+
+p <- ggtree(tree, aes(linetype = group)) %<+% ani +
+  scale_linetype_manual(values = c("0" = "dotted", "1" = "solid")) +
+  geom_tiplab(size = 2, offset = 0.035, align=T, linetype = NA, hjust = 1) +
+  scale_fill_manual(values = c("AC2"="#9A44F7","AC5"="#489DF9","AC6"="#CECB9E","AC8"="#5F9841"),na.value = NA) +
+  geom_fruit(geom = geom_point,
+             mapping = aes(y = name,
+                           fill = ac_group),
+             color = "white",
+             shape = 21,
+             size = 3,
+             offset = 0.05,
+             pwidth = 0.01125,
+             data = meta)
+
+fig.s7 <- gheatmap(p + ggnewscale::new_scale_fill(), 
+         data = ani.dcast[grep("N_",get_taxa_name(p),invert = T,value = T),
+                          grep("N_",get_taxa_name(p),invert = T,value = T)],
+         colnames_angle = -90,
+         font.size = 2,
+         hjust = 0,colnames_offset_y = 2,
+         high = "#5d82a1", low = "#f7e29d", legend_title = "ANI",
+         offset = 0.0375,
+         width = 3)
+
+fig.s7
+saveRDS(fig.s7, "figure_s7.RDS")
+```
+

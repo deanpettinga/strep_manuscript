@@ -4,6 +4,7 @@
 *.pcrd
 *.fna
 *.faa
+*.RDS
 
 # anvio/*
 *STREP-GENOMES.db
@@ -15,4 +16,3 @@
 metabolomics/raw_data/*
 microbox/raw_data/qPCR_results/*
 microbox/bin/*.html
-pangenome/bin/figures/

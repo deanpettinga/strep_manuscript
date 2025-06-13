@@ -1,0 +1,236 @@
+---
+title: "pangenomics"
+output: html_document
+date: "2025-04-17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# theme_set(theme_bw())
+```
+
+```{r}
+library(pagoo)
+library(micropan)
+library(tidyverse)
+library(farrowandball)
+```
+
+# Import
+
+```{r}
+meta <- read_tsv("genome_metadata.tsv", show_col_types = F) %>% 
+  select(isolate,strain,biolog_phenotype) %>%
+  rename(genome = isolate)
+
+cog_anno <- data.table::fread("../../../references/cog-2020/cog-20.def.tab") %>%
+  dplyr::select(V1,V2,V3,V4,V5) %>%
+  dplyr::rename(COG=V1, COG_Category=V2, COG_Description = V3, COG_Gene = V4, COG_Pathway = V5)
+
+emap <- read_tsv("../../analysis/emapper/out.emapper.annotations", comment = "##") %>% 
+  dplyr::rename("orthogroup" = "#query","GO" = "GOs") %>%
+  dplyr::mutate(orthogroup = gsub("-consensus", "", orthogroup),
+         COG = str_extract(eggNOG_OGs, "^COG[0-9]{4}")) %>%
+  dplyr::left_join(cog_anno) %>%
+  dplyr::select(orthogroup, COG, COG_Category, COG_Description, COG_Gene, COG_Pathway, GO, EC, KEGG_ko, CAZy, PFAMs) %>%
+  dplyr::rename(cluster = orthogroup)
+
+gtdbtk <- read_tsv("../../analysis/gtdbtk/gtdbtk.bac120.summary.tsv", show_col_types = F) %>%
+  dplyr::select(user_genome, classification) %>%
+  dplyr::rename(genome = user_genome) %>%
+  dplyr::mutate(classification = str_remove_all(classification,"[a-z]__")) %>%
+  tidyr::separate(classification, c("domain","phylum","class","order","family","genus","species"), sep = ";") %>%
+  dplyr::filter(genus != "Nocardioides") %>%
+  dplyr::select(genome,species) %>%
+  dplyr::mutate(species = str_remove_all(species,"Streptomyces "),
+         species = case_when(species == "canus_D" ~ "canus",
+                             grepl("^sp[0-9].",species) ~ NA,
+                             species == "" ~ NA,
+                             TRUE ~ species)) %>%
+  left_join(meta %>% select(genome,strain), by = "genome")
+                            
+prokka <- do.call(rbind,
+                  lapply(Sys.glob("../../analysis/prokka/*.txt") %>%
+                           str_extract("SAI[0-9]{3}"), function(x) data.table::fread(paste0("../../analysis/prokka/",x,".txt"), sep = ":", header = F) %>%
+                           dplyr::mutate(genome = x))) %>%
+  dplyr::rename(parameter = V1, value = V2) %>%
+  dplyr::filter(!parameter == "organism") %>%
+  dplyr::select(genome,parameter,value) %>%
+  dplyr::left_join(gtdbtk, by = "genome")
+
+quast <- read_tsv("../../analysis/quast/report.tsv", show_col_types = F) %>%
+  reshape2::melt(variable.name = "genome") %>%
+  dplyr::rename(parameter = Assembly) %>% arrange(parameter) %>%
+  dplyr::filter(parameter %in% c("# contigs","GC (%)","N90","Total length")) %>%
+  dplyr::select(genome,parameter,value) %>%
+  dplyr::left_join(gtdbtk, by = "genome")
+
+stats <- rbind(prokka,quast) %>%
+  dplyr::arrange(genome,parameter) %>%
+  dplyr::filter(!parameter %in% c("repeat_region","tmRNA","# contigs")) %>%
+  dplyr::mutate(value = as.numeric(value)) %>%
+  left_join(meta, by = "genome")
+
+rm(prokka)
+```
+
+```{r}
+col <- read_tsv("../../raw_data/colonization.tsv")
+
+plant <- read_tsv("../../raw_data/microbox-plant-phenes_mean.tsv") %>% 
+  group_by(isolate,treatment,variable) %>%
+  summarize(val = mean(value)) %>%
+  reshape2::dcast(formula = isolate + treatment ~ variable)
+
+plant <- left_join(plant %>%
+                     dplyr::filter(treatment == "drought") %>%
+                     dplyr::select(-treatment) %>%
+                     dplyr::rename(drought_pwc = pwc,
+                                   drought_dw = shoot_dryweight_g,
+                                   drought_fw = shoot_freshweight_g),
+                   plant %>%
+                     dplyr::filter(treatment == "water") %>%
+                     dplyr::select(-treatment) %>%
+                     dplyr::rename(water_pwc = pwc,
+                                   water_dw = shoot_dryweight_g,
+                                   water_fw = shoot_freshweight_g),
+                   by = "isolate")
+
+phenes <- left_join(col,plant, by = "isolate")
+rm(col,plant)
+
+```
+
+
+# Genome Stats
+
+```{r fig.width=8}
+ggplot(stats, aes(y = value, x = parameter, color = species, fill = species)) +
+  scale_color_fb("spec", na.value = "gray") +
+  scale_fill_fb("spec", na.value = "gray") +
+  geom_boxplot(outlier.shape = NA, aes(group = parameter)) +
+  geom_jitter(shape = 21, alpha = 0.6, height = 0, size = 3, width = 0.1) +
+  facet_wrap(vars(parameter), scales = "free") +
+  theme_bw()
+```
+
+# Pagoo input
+
+```{r}
+og <- read_tsv("../../analysis/orthofinder/Orthogroups/Orthogroups.tsv") %>%
+  reshape2::melt(id.vars = "Orthogroup", variable.name = "genome") %>%
+  mutate(n_col = as.numeric(str_count(value,",") + 1)) %>%
+  filter(!is.na(value))
+
+# prep with required data for pagoo
+og <- og %>% 
+  tidyr::separate(value, into = as.character(seq(1:max(og$n_col))), sep = ", ") %>%
+  reshape2::melt(id.vars = c("Orthogroup","genome"),variable.name = "col",value.name = "gene") %>%
+  dplyr::arrange(Orthogroup,genome) %>%
+  dplyr::filter(!col == "n_col") %>%
+  dplyr::select(-col) %>%
+  dplyr::filter(!is.na(gene)) %>%
+  dplyr::rename(cluster = Orthogroup,org = genome) %>%
+  dplyr::select(gene,org,cluster)
+
+pg <- pagoo(data = og, # required data
+            org_meta = gtdbtk %>% dplyr::rename(org = genome) %>% as.data.frame()) # organism data
+            # cluster_meta = as.data.frame(emap)) # cluster data
+```
+
+# Figure 1b
+
+```{r}
+pg$gg_curves() +
+  geom_point(alpha = 0.6) + 
+  # facet_wrap(~Category, scales = 'free_y') + 
+  theme_bw(base_size = 15) + 
+  scale_color_manual(values = c("#5d82a1","#f7e29d"))
+
+```
+
+# Figure 1c-d
+
+## import data
+
+```{r}
+# function to calculate if each orthogroup is shared across any given pair of isolates
+pairwise_ogs <- function(x){
+  # If x is a vector (from apply), convert it to proper format
+  if(is.vector(x)) {
+    iso1 <- x[1]
+    iso2 <- x[2]
+  } else {
+    # Original logic for data frame input
+    iso1 <- x[,1]
+    iso2 <- x[,2]
+  }
+  # make data long format
+  df <- og %>% t() %>% as.data.frame() %>% 
+    dplyr::select(iso1,iso2) %>% 
+    rownames_to_column("OG") %>%
+    dplyr::mutate(reference = iso1, query = iso2)
+  
+  # change 
+  colnames(df) <- c("OG","count1","count2","reference","query")
+  
+  df <- df %>%
+    mutate(shared = case_when(count1 > 0 & count2 > 0 ~ 1,
+                              count1 == 0 | count2 == 0 ~ 0),
+           count_diff = abs(count1-count2)) %>%
+    dplyr::select(OG,reference,query,shared,count_diff)
+  return(df)
+}
+
+# apply across all pairs of isolates in dataset (n=48)
+# and combine results into a single, tidy df
+pairs <- do.call(rbind,
+                 apply(unique(meta$genome) %>% combn(., m = 2) %>% t() %>% as.data.frame() %>% .[1,],
+                       MARGIN = 1,
+                       FUN = pairwise_ogs))
+
+# now match it up with ANI data from fastANI
+shared <- left_join(pairs %>% 
+                      group_by(reference, query) %>%
+                      summarize(n_shared = sum(shared)),
+                    pairs %>% 
+                      group_by(reference, query) %>%
+                      filter(shared == 0, count_diff > 0) %>% 
+                      summarize(n_unshared = n()),
+                    by = c("reference","query")) %>%
+          left_join(ani, by = c("reference","query")) %>%
+          mutate(Comparison = case_when(ANI > 99 ~ "Strain",
+                                        ANI < 99 & ANI > 95 ~ "Species",
+                                        ANI < 95 ~ "Genus"))
+```
+
+## plot
+```{r fig.width=3, fig.height=5}
+## Boxplots
+fig.1cd <- rbind(# Within Strain
+      shared %>%
+        filter(ANI > 99) %>%
+        mutate(Comparison = "Strain"),
+      # Within-Species, but not within strain 
+      shared %>%
+        filter(ANI > 95 & ANI < 99) %>%
+        mutate(Comparison = "Species"),
+      # Within Genus, but not within species
+      shared %>%
+        filter(ANI < 95) %>%
+        mutate(Comparison = "Genus")) %>%
+  reshape2::melt(id.vars = c("reference","query","Comparison")) %>%
+  filter(!variable == "ANI") %>%
+  mutate(share = case_when(variable == "n_shared" ~ "Shared",
+                           variable == "n_unshared" ~ "Unshared")) %>%
+  ggplot(aes(x = Comparison, y = value, fill = Comparison)) +
+    scale_fill_fb("lightspec") +
+    geom_jitter(height = 0, width = 0.2, alpha = 0.4, show.legend = F) +
+    geom_boxplot(outlier.shape = NA, show.legend = F) +
+    facet_grid(rows = vars(share), scales = "free") +
+    theme_bw()
+
+fig.1cd
+
+saveRDS(fig.1cd,"figure_1cd.RDS")        
+```

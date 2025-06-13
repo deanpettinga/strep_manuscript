@@ -1,0 +1,145 @@
+---
+title: "Figure 4"
+output: html_document
+date: "2025-05-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.height=8,
+                      fig.width=10)
+```
+
+# Libraries
+
+```{r}
+library(tidyverse)
+library(reshape2)
+library(ggcorrplot)
+library(farrowandball)
+library(ggtree)
+library(ggtreeExtra)
+library(ape)
+```
+
+# Input
+
+```{r fig.width=14, message=FALSE, warning=FALSE}
+meta <- read_tsv("genome_metadata.tsv", show_col_types = F) %>%
+  select(isolate,code_dc) %>%
+  mutate(code_dc = gsub("-","",code_dc),
+         name = case_when(!is.na(code_dc) ~ code_dc,
+                          TRUE ~ isolate)) 
+
+qpcr <- read_tsv("qPCR_results.tsv", show_col_types = F) %>%
+  dplyr::select(isolate,treatment,bio_rep,tech_rep,Cq,SQ,input_nguL,colonization) %>%
+  # get mean of technical reps
+  group_by(isolate,treatment,bio_rep) %>%
+  summarize(col = mean(colonization)) %>%
+  filter(!is.na(col))
+
+qpcr.mean <- qpcr %>%
+  left_join(meta, by = "isolate") %>%
+  filter(!isolate == "Mock") %>%
+  group_by(name,treatment) %>%
+  summarize(col = mean(col)) %>%
+  reshape2::dcast(name ~ treatment, value.var = "col") %>%
+  mutate(DE = log2(drought/water))
+
+qpcr.mean <- qpcr.mean %>%
+  mutate(name = factor(name, levels=qpcr.mean %>% arrange(DE) %>% .$name))
+```
+
+
+```{r fig.width=14, message=FALSE, warning=FALSE}
+qpcr.test <- qpcr %>%
+  group_by(isolate, treatment) %>% select(-bio_rep) %>%
+  tidyr::nest(data = c(treatment,col)) %>%
+  mutate(var_result = purrr::map(data, function(df){
+    # Extract the data for each treatment
+    water_data <- df %>% filter(treatment == "water") %>% pull(col)
+    drought_data <- df %>% filter(treatment == "drought") %>% pull(col)
+    # Run the t-test
+    var.test(water_data,drought_data)})) %>%
+  mutate(tidy_var = purrr::map(var_result, broom::tidy)) %>%
+  unnest(tidy_var) %>%
+  rename(equal_var_p = p.value) %>%
+  select(isolate,equal_var_p) %>%
+  mutate(test = ifelse(equal_var_p < 0.05,"welch","t-test"))
+```
+
+# Statistics
+
+```{r}
+tests <- rbind(
+  # t.tests
+  qpcr %>%
+    select(-bio_rep) %>%
+    filter(isolate %in% (qpcr.test %>% filter(test == "t-test") %>% .$isolate)) %>%
+    group_by(treatment) %>%
+    tidyr::nest(data = c(treatment,col)) %>%
+    mutate(t_test = purrr::map(data, function(df){
+      # Extract the data for each treatment
+      water_data <- df %>% filter(treatment == "water") %>% pull(col)
+      drought_data <- df %>% filter(treatment == "drought") %>% pull(col)
+      # Run the t-test
+      t.test(water_data, drought_data, 
+             alternative = "two.sided",
+             var.equal = TRUE, paired = FALSE)})) %>%
+    mutate(tidy_t = purrr::map(t_test, broom::tidy)) %>%
+    unnest(tidy_t) %>%
+    dplyr::select(isolate,p.value) %>%
+    mutate(test = "t.test"),
+  # Welch's t-tests
+  qpcr %>%
+    select(-bio_rep) %>%
+    filter(isolate %in% (qpcr.test %>% filter(test == "welch") %>% .$isolate)) %>%
+    group_by(treatment) %>%
+    tidyr::nest(data = c(treatment,col)) %>%
+    mutate(welch = purrr::map(data, function(df){
+      # Extract the data for each treatment
+      water_data <- df %>% filter(treatment == "water") %>% pull(col)
+      drought_data <- df %>% filter(treatment == "drought") %>% pull(col)
+      # Run the t-test
+      t.test(water_data, drought_data, 
+             alternative = "two.sided",
+             var.equal = FALSE, paired = FALSE)})) %>%
+    mutate(tidy_welch = purrr::map(welch, broom::tidy)) %>%
+    unnest(tidy_welch) %>%
+    dplyr::select(isolate,p.value) %>%
+    mutate(test = "welch")
+) %>%
+  mutate(p.adj = p.adjust(p.value, method = "BH"),
+         sig = ifelse(p.adj < 0.05, "FDR<0.05","NS"))
+
+tests
+```
+
+# Figure
+
+```{r fig.height=6, fig.width=5}
+# fig.4a <- 
+  qpcr.mean %>%
+  left_join(meta, by = "name") %>%
+  left_join(tests, by = "isolate") %>%
+  mutate(name = factor(name, levels = (qpcr.mean %>% arrange(DE) %>% .$name))) %>%
+ggplot(aes(x = DE, y = name, fill = DE, color = sig)) +
+    scale_color_manual(values = c("black","gray")) +
+    scale_fill_gradient2(low="#599ec4", high="#AF344D", mid = "white", midpoint = 0) +
+    geom_col() +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major = element_blank()) +
+    ylab(element_blank())
+
+fig.4a
+
+saveRDS(fig.4a, file = "figure_4a.RDS")
+```
+
+```{r}
+
+
+
+```
+

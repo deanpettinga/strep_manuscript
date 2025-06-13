@@ -1,0 +1,463 @@
+---
+title: "Figure 4"
+output: html_document
+date: "2025-05-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Libraries
+
+```{r}
+library(tidyverse)
+library(reshape2)
+library(ggcorrplot)
+library(farrowandball)
+library(ggtree)
+library(ggtreeExtra)
+library(ape)
+library(patchwork)
+```
+
+# Functions
+
+```{r}
+
+plot_res <- function(OG, OG.df, RES){
+  df <- OG.df %>% 
+    dplyr::filter(Orthogroup == OG) %>%
+    dplyr::rename(`Drought Enrichment` = de)
+  
+  ggplot(df, aes(x = count, y = `Drought Enrichment`)) +
+    scale_colour_gradient2(low = "#02348B", mid = "white", high = "#9E2222", midpoint = 0, aesthetics = "fill") +
+    geom_smooth(formula = y ~ x, se = F, method = "lm", linewidth = 1.2, color = "black") +
+    geom_jitter(aes(fill = `Drought Enrichment`), height = 0, shape=21, size = 5, width = 0.1) +
+    # guides(fill = guide_legend(title = "Drought Enrichment")) +
+    theme_bw() +
+    ggtitle(OG, subtitle = paste0("λ = ", round(RES %>% dplyr::filter(orthogroup == OG) %>% .$lambda,2),"\n",
+                                  RES %>% dplyr::filter(orthogroup == OG) %>% .$COG_Gene,"\n",
+                                  RES %>% dplyr::filter(orthogroup == OG) %>% .$COG_Description,"\n",
+                                  RES %>% dplyr::filter(orthogroup == OG) %>% .$COG,", ",
+                                  RES %>% dplyr::filter(orthogroup == OG) %>% .$COG_Category
+                                  ))
+}
+
+table_and_plots <- function(RESULT, COG_CATEGORY, SIGN, OG.TABLE){
+  if(SIGN == "+"){
+    # print table
+    result %>% 
+      dplyr::filter(test == "yes",
+                    estimate > 0,
+                    FDR < 0.2,
+                    grepl(COG_CATEGORY, COG_Category)) %>%
+      dplyr::select(orthogroup,estimate,p,FDR,COG,COG_Category,COG_Description,everything()) %>%
+      arrange(p) %>%
+      print()
+    
+    # now plot each row in the table
+    lapply(result %>%
+             dplyr::filter(test == "yes",
+                           estimate > 0,
+                           FDR < 0.2,
+                           grepl(COG_CATEGORY, # Inorganic ion transport and metabolism
+                                 COG_Category)) %>%
+             dplyr::select(orthogroup,estimate,p,FDR,COG,COG_Category,COG_Description,everything()) %>%
+             arrange(p) %>%
+             .$orthogroup,
+           function(x) plot_res(x, OG.TABLE, RESULT))
+    
+  } else if (SIGN == "-"){
+    # print table
+    result %>% 
+      dplyr::filter(test == "yes",
+                    estimate < 0,
+                    FDR < 0.2,
+                    grepl(COG_CATEGORY, COG_Category)) %>%
+      dplyr::select(orthogroup,estimate,p,FDR,COG,COG_Category,COG_Description,everything()) %>%
+      arrange(p) %>%
+      print()
+    
+    # now plot each row in the table
+    lapply(result %>%
+             dplyr::filter(test == "yes",
+                           estimate < 0,
+                           FDR < 0.2,
+                           grepl(COG_CATEGORY, # Inorganic ion transport and metabolism
+                                 COG_Category)) %>%
+             dplyr::select(orthogroup,estimate,p,FDR,COG,COG_Category,COG_Description,everything()) %>%
+             arrange(p) %>%
+             .$orthogroup,
+           function(x) plot_res(x, OG.TABLE, RESULT))
+  } else {stop("SIGN must be either '+' or '-'")}
+  
+  
+  
+}
+
+run_enricher <- function(RESULT, BACKGROUND, T2G, T2N){
+  
+  ENRICH_RES <- enricher(gene = RESULT$orthogroup,
+                         qvalueCutoff = 1,
+                         pvalueCutoff = 1,
+                         minGSSize = 1,
+                         maxGSSize = 100000,
+                         pAdjustMethod = "BH",
+                         universe = BACKGROUND, #background
+                         TERM2GENE = T2G,
+                         TERM2NAME = T2N)
+  return(ENRICH_RES)
+}
+```
+
+# Input 
+
+## Data
+```{r}
+cog_anno <- data.table::fread("../../../references/cog-2020/cog-20.def.tab") %>%
+  select(V1,V2,V3,V4,V5) %>%
+  rename(COG=V1, COG_Category=V2, COG_Description = V3, COG_Gene = V4, COG_Pathway = V5)
+
+emap <- read_tsv("../../analysis/emapper/out.emapper.annotations", comment = "##") %>% 
+  rename(orthogroup = `#query`,
+         GO = GOs) %>%
+  mutate(orthogroup = gsub("-consensus", "", orthogroup),
+         COG = str_extract(eggNOG_OGs, "^COG[0-9]{4}")) %>%
+  left_join(cog_anno) %>%
+  select(orthogroup, COG, COG_Category, COG_Description, COG_Gene, COG_Pathway, GO, EC, KEGG_ko, CAZy, PFAMs)
+
+# pfam <- fread("../../references/pfamA.txt.gz") %>% 
+#   select(V1,V2,V4,V8) %>%
+#   rename(pfam = V1, name = V2, desc = V4, desc_long = V8)
+
+result <- read_tsv("../../analysis/pgls2/results/de.tsv", show_col_types = F) %>% 
+  left_join(emap, by = "orthogroup") 
+
+og.full <- read_tsv("../../analysis/orthofinder/Orthogroups/Orthogroups.GeneCount.tsv", show_col_types = F) %>%
+  dplyr::select(-Total) %>%
+  reshape2::melt(variable.name = "isolate", value.name = "count") %>%
+  left_join(read_tsv("../../raw_data/colonization.tsv") %>% 
+              dplyr::select(isolate,`log2(Drought/Water)`) %>%
+              rename(de = `log2(Drought/Water)`))
+```
+
+## EnrichR Objects
+```{r}
+# COG_category
+t2g.cog_cat <- emap %>%
+  dplyr::select(COG_Category, orthogroup) %>%
+  separate_rows(COG_Category, sep = "") %>%
+  dplyr::select(COG_Category, orthogroup) %>%
+  filter(!is.na(COG_Category),
+         !is.na(orthogroup),
+         !COG_Category == "",
+         !orthogroup == "") %>%
+  unique()
+
+t2n.cog_cat <- read_tsv("../../../references/cog-2020/fun-20.tab",
+                        col_names = c("COG_Category","x","description")) %>% 
+  select(COG_Category,description)
+
+# GO
+t2g.go <- emap %>%
+  dplyr::select(GO, orthogroup) %>%
+  separate_rows(GO, sep = ",") %>%
+  dplyr::select(GO, orthogroup) %>%
+  filter(!is.na(GO),
+         !is.na(orthogroup),
+         !GO == "-", !orthogroup == "-") %>%
+  unique()
+
+t2n.go <- AnnotationDbi::select(GO.db,
+       columns=c("GOID","TERM"),
+       keys=keys(GO.db, keytype="GOID"), 
+       keytype="GOID") %>%
+  dplyr::rename(GO = GOID, description = TERM)
+  
+# PFAM
+t2g.pfam <- emap %>%
+  dplyr::select(PFAMs, orthogroup) %>%
+  filter(!is.na(PFAMs)) %>%
+  separate_rows(PFAMs, sep = ",") %>%
+  dplyr::select(PFAMs, orthogroup) %>%
+  filter(!is.na(PFAMs),!is.na(orthogroup)) %>%
+  unique() 
+
+t2n.pfam <- read_tsv("../../../references/Pfam-A.clans.tsv",
+                     col_names = c("Pfam", "clan_accession", "clan_ID", "Pfam_ID", "description")) %>%
+  mutate(description = paste(Pfam,description)) %>%
+  dplyr::select(Pfam_ID, description) %>%
+  unique()
+
+# KO
+t2g.ko <- emap %>%
+  dplyr::select(KEGG_ko, orthogroup) %>%
+  mutate(KEGG_ko = gsub("ko:","",KEGG_ko)) %>%
+  filter(!is.na(KEGG_ko),
+         !KEGG_ko == "-", !orthogroup == "-") %>%
+  separate_rows(KEGG_ko, sep = ",") %>%
+  unique()
+
+t2n.ko <- read_tsv("../../../references/ko", col_names = c("KO","ANNO")) %>% 
+  tidyr::separate(., ANNO, into = c("Symbol","description","EC"), sep = ";|\\[") %>%
+  mutate(EC = gsub("]","",EC)) %>%
+  dplyr::select(KO, description)
+
+# All
+t2n.all <- rbind(t2n.go %>% dplyr::rename(code = GO),
+                 t2n.pfam %>% dplyr::rename(code = Pfam_ID),
+                 t2n.ko %>% dplyr::rename(code = KO))
+```
+
+## Enrichment
+### PGLS Result
+
+```{r}
+result %>% 
+  mutate(Significant = case_when(se < 0.25 & abs(estimate) > 0.25 & shapiro.p > 0.05 & estimate > 0 ~ "DE FDR<0.1",
+                                 se < 0.25 & abs(estimate) > 0.25 & shapiro.p > 0.05 & estimate < 0 ~ "DD, FDR<0.1",
+                                 TRUE ~ "N.S.")) %>%
+ggplot(aes(x = estimate, y = -log10(p), fill = Significant)) +
+  scale_fill_fb("bellsprout") +
+  geom_point(shape = 21, size = 3, alpha = 0.6) +
+  theme_bw()
+```
+
+### COG Enrichment
+
+```{r}
+enrich_cog <- rbind(
+  run_enricher(RESULT = result %>% filter(test == "yes", estimate < 0, FDR < 0.2),
+             BACKGROUND = result$orthogroup,
+             T2G = t2g.cog_cat,
+             T2N = t2n.cog_cat) %>% 
+  as.data.frame() %>%
+  dplyr::mutate(cnv_de_corr = "-",
+                db = "COG_Category"),
+  run_enricher(RESULT = result %>% filter(test == "yes", estimate > 0, FDR < 0.2),
+             BACKGROUND = result$orthogroup,
+             T2G = t2g.cog_cat,
+             T2N = t2n.cog_cat) %>% 
+  as.data.frame() %>%
+  dplyr::mutate(cnv_de_corr = "+",
+                db = "COG_Category")) %>%
+  select(db,cnv_de_corr,everything()) %>%
+  arrange(p.adjust)
+
+enrich_cog %>% filter(cnv_de_corr == "+")
+enrich_cog %>% filter(cnv_de_corr == "-")
+```
+
+
+## DE data
+```{r fig.width=14, message=FALSE, warning=FALSE}
+meta <- read_tsv("genome_metadata.tsv", show_col_types = F) %>%
+  select(isolate,code_dc) %>%
+  mutate(code_dc = gsub("-","",code_dc),
+         name = case_when(!is.na(code_dc) ~ code_dc,
+                          TRUE ~ isolate)) 
+
+qpcr <- read_tsv("qPCR_results.tsv", show_col_types = F) %>%
+  dplyr::select(isolate,treatment,bio_rep,tech_rep,Cq,SQ,input_nguL,colonization) %>%
+  # get mean of technical reps
+  group_by(isolate,treatment,bio_rep) %>%
+  summarize(col = mean(colonization)) %>%
+  filter(!is.na(col))
+
+qpcr.mean <- qpcr %>%
+  left_join(meta, by = "isolate") %>%
+  filter(!isolate == "Mock") %>%
+  group_by(name,treatment) %>%
+  summarize(col = mean(col)) %>%
+  reshape2::dcast(name ~ treatment, value.var = "col") %>%
+  mutate(DE = log2(drought/water))
+
+qpcr.mean <- qpcr.mean %>%
+  mutate(name = factor(name, levels=qpcr.mean %>% arrange(DE) %>% .$name))
+
+qpcr.test <- qpcr %>%
+  group_by(isolate, treatment) %>% select(-bio_rep) %>%
+  tidyr::nest(data = c(treatment,col)) %>%
+  mutate(var_result = purrr::map(data, function(df){
+    # Extract the data for each treatment
+    water_data <- df %>% filter(treatment == "water") %>% pull(col)
+    drought_data <- df %>% filter(treatment == "drought") %>% pull(col)
+    # Run the t-test
+    var.test(water_data,drought_data)})) %>%
+  mutate(tidy_var = purrr::map(var_result, broom::tidy)) %>%
+  unnest(tidy_var) %>%
+  rename(equal_var_p = p.value) %>%
+  select(isolate,equal_var_p) %>%
+  mutate(test = ifelse(equal_var_p < 0.05,"welch","t-test"))
+
+tests <- rbind(
+  # t.tests
+  qpcr %>%
+    select(-bio_rep) %>%
+    filter(isolate %in% (qpcr.test %>% filter(test == "t-test") %>% .$isolate)) %>%
+    group_by(treatment) %>%
+    tidyr::nest(data = c(treatment,col)) %>%
+    mutate(t_test = purrr::map(data, function(df){
+      # Extract the data for each treatment
+      water_data <- df %>% filter(treatment == "water") %>% pull(col)
+      drought_data <- df %>% filter(treatment == "drought") %>% pull(col)
+      # Run the t-test
+      t.test(water_data, drought_data, 
+             alternative = "two.sided",
+             var.equal = TRUE, paired = FALSE)})) %>%
+    mutate(tidy_t = purrr::map(t_test, broom::tidy)) %>%
+    unnest(tidy_t) %>%
+    dplyr::select(isolate,p.value) %>%
+    mutate(test = "t.test"),
+  # Welch's t-tests
+  qpcr %>%
+    select(-bio_rep) %>%
+    filter(isolate %in% (qpcr.test %>% filter(test == "welch") %>% .$isolate)) %>%
+    group_by(treatment) %>%
+    tidyr::nest(data = c(treatment,col)) %>%
+    mutate(welch = purrr::map(data, function(df){
+      # Extract the data for each treatment
+      water_data <- df %>% filter(treatment == "water") %>% pull(col)
+      drought_data <- df %>% filter(treatment == "drought") %>% pull(col)
+      # Run the t-test
+      t.test(water_data, drought_data, 
+             alternative = "two.sided",
+             var.equal = FALSE, paired = FALSE)})) %>%
+    mutate(tidy_welch = purrr::map(welch, broom::tidy)) %>%
+    unnest(tidy_welch) %>%
+    dplyr::select(isolate,p.value) %>%
+    mutate(test = "welch")
+) %>%
+  mutate(p.adj = p.adjust(p.value, method = "BH"),
+         sig = ifelse(p.adj < 0.05, "FDR<0.05","NS"))
+
+```
+
+# Figures 
+
+## 4A
+
+```{r}
+fig.4a <- 
+  qpcr.mean %>%
+  left_join(meta, by = "name") %>%
+  left_join(tests, by = "isolate") %>%
+  mutate(name = factor(name, levels = (qpcr.mean %>% arrange(DE) %>% .$name))) %>%
+ggplot(aes(x = DE, y = name, fill = DE, color = sig)) +
+    scale_color_manual(values = c("black","gray"), guide = element_blank()) +
+    scale_fill_gradient2(low="#599ec4", high="#AF344D", mid = "white", midpoint = 0) +
+    geom_col() +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major = element_blank()) +
+    guides(colour = "none") +
+    ylab(element_blank())
+
+fig.4a
+
+saveRDS(fig.4a, file = "figure_4a.RDS")
+```
+
+## 4B
+```{r}
+fig.4b <- enrich_cog %>% 
+  filter(cnv_de_corr == "+") %>%
+  mutate(FoldEnrichment = case_when(cnv_de_corr == "+" ~ FoldEnrichment,
+                                    cnv_de_corr == "-" ~ -FoldEnrichment),
+         Significance = ifelse(pvalue < 0.1, "p < 0.1","NS"),
+         Description = factor(Description, levels = enrich_cog %>% 
+                                filter(cnv_de_corr == "+") %>%
+                                arrange(FoldEnrichment) %>% .$Description)) %>%
+  rename(`Gene Clusters` = Count) %>%
+  filter(!Description %in% c(NA,"-","Function unknown")) %>%
+  ggplot(aes(x = FoldEnrichment, y = Description, color = Significance, size = `Gene Clusters`)) +
+    # geom_vline(xintercept = 0, linetype = "dotted") +
+    scale_color_manual(values = c("p < 0.1" ="black","NS" = "gray")) +
+    # scale_fill_manual(values = c("+" = "#A04344", "-" = "#5d82a1")) +
+    geom_point(stroke = 1.2, shape = 21, fill = "#A04344") +
+    ylab(element_blank()) +
+    theme_bw() +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major = element_blank())
+
+fig.4b
+
+saveRDS(fig.4b,"figure_4b.RDS")
+```
+
+## 4C
+
+```{r}
+# FabG
+fig.4c <- og.full %>% 
+  filter(Orthogroup %in% c("OG0000632",
+                           "OG0000949",
+                           "OG0005416",
+                           "OG0007366",
+                           "OG0000665",
+                           "OG0006728",
+                           "OG0006854",
+                           "OG0000880")) %>%
+  ggplot(aes(x = count, y = de, fill = Orthogroup)) +
+    scale_color_fb("lightspec") +
+    scale_fill_fb("lightspec") +
+    geom_smooth(aes(color = Orthogroup), formula = y ~ x, se = F, method = "lm", linewidth = 1.2, ,show_guide = FALSE) +
+    geom_point(position = position_jitterdodge(jitter.width = 0.15), height = 0, shape=21, size =2.5) +
+    # geom_smooth(aes(group = 1), color = "black", formula = y ~ x, se = F, method = "lm", linewidth = 2, ,show_guide = FALSE) +
+    guides(fill = guide_legend(title = "Gene Cluster")) +
+    ylab("DE") +
+    xlab("Gene Count") +
+    ggtitle("FabG") +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major = element_blank())
+
+fig.4c
+
+saveRDS(fig.4c, file = "figure_4c.RDS")
+```
+
+## 4D
+
+```{r}
+# ProP
+fig.4d <- og.full %>% 
+  filter(Orthogroup %in% c("OG0000125",
+                           "OG0000129",
+                           "OG0001611",
+                           "OG0004943",
+                           "OG0005190",
+                           "OG0005502",
+                           "OG0005519")) %>%
+  ggplot(aes(x = count, y = de, fill = Orthogroup)) +
+    scale_color_fb("lightspec") +
+    scale_fill_fb("lightspec") +
+    geom_smooth(aes(color = Orthogroup), formula = y ~ x, se = F, method = "lm", linewidth = 1.2, ,show_guide = FALSE) +
+    geom_point(position = position_jitterdodge(jitter.width = 0.15), height = 0, shape=21, size = 2.5) +
+    # geom_smooth(aes(group = 1), color = "black", formula = y ~ x, se = F, method = "lm", linewidth = 2, ,show_guide = FALSE) +
+    guides(fill = guide_legend(title = "Gene Cluster")) +
+    ylab("DE") +
+    xlab("Gene Count") +
+    ggtitle("ProP") +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank(),
+          panel.grid.major = element_blank())
+
+fig.4d
+
+saveRDS(fig.4d, file = "figure_4d.RDS")
+```
+
+# Composition
+
+```{r fig.height=10, fig.width=12}
+(fig.4a + fig.4b) / (fig.4c + fig.4d) +
+   plot_layout(heights = unit(c(12, 6), c('cm')))
+```
+
+```{r}
+sessionInfo()
+```
+

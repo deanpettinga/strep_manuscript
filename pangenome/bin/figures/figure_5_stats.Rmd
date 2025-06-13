@@ -1,0 +1,226 @@
+---
+title: "phylogenetic signal"
+output: html_document
+date: "2025-04-17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# theme_set(theme_bw())
+```
+
+```{r}
+library(tidyverse)
+library(ggrepel)
+library(farrowandball)
+library(vegan)
+library(ade4)
+library(phytools) # 2.3-0
+library(nlme) # 3.1-162
+library(patchwork)
+```
+
+# Import
+
+```{r}
+meta <- read_tsv("genome_metadata.tsv") %>%
+  select(isolate,code_dc,ac_group)
+
+ani <- read_tsv("../../analysis/fastani/fastani_many-to-many.tsv",
+                col_names = c("reference","query","ANI","x","y")) %>% 
+  select(-x,-y) %>% 
+  mutate(reference = gsub("raw_data/fna/","",reference),
+         reference = gsub(".fna","",reference),
+         query = gsub("raw_data/fna/","",query),
+         query = gsub(".fna","",query))
+
+plant <- read_tsv("../../raw_data/microbox-plant-phenes.tsv") %>%
+  filter(isolate != "Mock") %>%
+  left_join(meta, by = "isolate") %>%
+  select(code_dc,treatment,shoot_dryweight_g)
+
+de <- read_tsv("../../raw_data/colonization.tsv") %>%
+  mutate(DE = mean_col.drought/mean_col.water) %>%
+  select(isolate,DE)
+
+qpcr <- read_tsv("qPCR_results.tsv", show_col_types = F) %>%
+  dplyr::select(isolate,treatment,bio_rep,tech_rep,Cq,SQ,input_nguL,colonization) %>%
+  # get mean of technical reps
+  group_by(isolate,treatment,bio_rep) %>%
+  summarize(col = mean(colonization))
+
+```
+
+# Mantel
+
+## ANI-Plant Biomass
+
+```{r}
+ani.mat <- reshape2::dcast(ani, reference ~ query, value.var = "ANI") %>% 
+  column_to_rownames("reference") %>% 
+  as.matrix() %>% as.dist(upper = T) %>% 
+  as.matrix()
+
+drought.mat <- ((1-dist(plant %>% 
+                         filter(treatment == "drought") %>%
+                         select(-treatment) %>% 
+                         column_to_rownames("isolate"),
+                       method = "euclidean",
+                       upper = T)) * 100) %>% as.matrix()
+
+water.mat <- ((1-dist(plant %>% 
+                         filter(treatment == "water") %>%
+                         select(-treatment) %>% 
+                         column_to_rownames("isolate"),
+                       method = "euclidean",
+                       upper = T)) * 100) %>% as.matrix()
+```
+
+### Drought
+
+```{r}
+mantel.test(ani.mat, drought.mat)
+```
+
+### Water
+
+```{r}
+mantel.test(ani.mat,water.mat)
+```
+
+# Phylogenetic Signal
+
+```{r}
+de.df <- read_tsv("../../raw_data/colonization.tsv") %>% 
+  dplyr::mutate(de = `log2(Drought/Water)`) %>%
+  dplyr::select(isolate,de) %>% 
+  column_to_rownames("isolate")
+
+de <- de.df$de
+names(de) <- rownames(de.df)
+rm(de.df)
+
+plant.df <- read_tsv("../../raw_data/microbox-plant-phenes_mean.tsv") %>%
+  filter(isolate != "Mock", variable == "shoot_dryweight_g") %>%
+  select(-biolog,-variable)
+
+tree <- read.tree("../../analysis/gtotreeN/gtotreeN.tre")
+# root the tree first using MRCA from outgroup Nocardioides
+root_node <- phytools::findMRCA(tree=tree, tips=c("N_dokdonensis","N_humi"))
+tree <- reroot(tree, node.number=root_node)
+# Subset the phylogenetic tree to exclude tips without data
+tree <- drop.tip(phy = tree, tip=c("N_dokdonensis","N_humi"))
+
+# add small value to length 0 tree branches to prevent issues in the PGLS
+tree$edge.length[tree$edge.length == 0] <- 0.0000001
+
+```
+
+## DE
+
+```{r}
+# test for Pagel's Lambda
+phylosig(tree, de, method = "lambda", test = TRUE)
+# test for Blomberg's K
+phylosig(tree, de, method="K", test=TRUE)
+
+```
+
+## Biomass
+
+```{r}
+plant.water <- plant.df %>% filter(treatment == "water") %>% .$value
+names(plant.water) <- plant.df %>% filter(treatment == "water") %>% .$isolate
+
+plant.drought <- plant.df %>% filter(treatment == "drought") %>% .$value
+names(plant.drought) <- plant.df %>% filter(treatment == "drought") %>% .$isolate
+```
+
+### Water
+
+```{r}
+phylosig(tree, plant.water, method = "lambda", test = TRUE)
+phylosig(tree, plant.water, method = "K", test = TRUE)
+```
+
+### Drought
+```{r}
+phylosig(tree, plant.drought, method = "lambda", test = TRUE)
+phylosig(tree, plant.drought, method = "K", test = TRUE)
+```
+
+# DC01 vs SAI126
+
+## DE
+```{r fig.height=3, fig.width=3}
+
+# get mean value under water treatment for comparison
+water_mean.df <- qpcr %>% 
+  left_join(meta, by = "isolate") %>%
+  group_by(code_dc,treatment) %>%
+  filter(treatment == "water") %>% 
+  summarize(water_mean = mean(col))
+
+# now calculate individual DE values by comparing drought 
+# colonization to the means under water treatment
+de.pair <- ungroup(qpcr) %>%
+  left_join(meta, by = "isolate") %>%
+  filter(code_dc %in% c("SAI126","DC01"),
+         treatment == "drought") %>%
+  dplyr::select(code_dc,col) %>%
+  mutate(DE = case_when(code_dc == "DC01" ~ col*(water_mean.df %>% filter(code_dc == "DC01") %>% .$water_mean),
+                        code_dc == "SAI126" ~ col*(water_mean.df %>% filter(code_dc == "SAI126") %>% .$water_mean))) %>%
+  filter(!is.na(DE))
+
+# test for differences between DC01 and SAI126
+t.test(x = de.pair %>% filter(code_dc == "DC01") %>% .$DE,
+       y = de.pair %>% filter(code_dc == "SAI126") %>% .$DE,
+       alternative = "two.sided")
+
+de.pair %>% 
+  filter(!is.na(DE),
+         code_dc %in% c("DC01","SAI126")) %>%
+  ggplot(aes(x = code_dc, y = DE, fill = code_dc)) +
+  scale_fill_fb("lightspec") +
+  geom_boxplot() +
+  geom_point(shape = 21, size = 3) +
+  theme_bw() + 
+  ggtitle("DE")
+```
+
+## Biomass (drought)
+
+```{r fig.height=3, fig.width=3}
+t.test(x = plant %>% filter(code_dc == "DC01", treatment == "drought") %>% .$shoot_dryweight_g,
+       y = plant %>% filter(code_dc == "SAI126", treatment == "drought") %>% .$shoot_dryweight_g,
+       alternative = "two.sided")
+
+plant %>% 
+  filter(treatment == "drought",
+         code_dc %in% c("DC01","SAI126")) %>%
+  ggplot(aes(x = code_dc, y = shoot_dryweight_g,  fill = code_dc)) +
+  scale_fill_fb("lightspec") +
+  geom_boxplot() +
+  geom_point(shape = 21, size = 3) +
+  theme_bw() + 
+  ggtitle("Biomass (Drought)")
+```
+
+## Biomass (water)
+
+```{r fig.height=3, fig.width=3}
+t.test(x = plant %>% filter(code_dc == "DC01", treatment == "water") %>% .$shoot_dryweight_g,
+       y = plant %>% filter(code_dc == "SAI126", treatment == "water") %>% .$shoot_dryweight_g,
+       alternative = "two.sided")
+
+plant %>% 
+  filter(treatment == "water",
+         code_dc %in% c("DC01","SAI126")) %>%
+  ggplot(aes(x = code_dc, y = shoot_dryweight_g,  fill = code_dc)) +
+  scale_fill_fb("lightspec") +
+  geom_boxplot() +
+  geom_point(shape = 21) +
+  theme_bw() + 
+  ggtitle("Biomass (Water)")
+```
+
