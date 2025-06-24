@@ -16,3 +16,5 @@
 metabolomics/raw_data/*
 microbox/raw_data/qPCR_results/*
 microbox/bin/*.html
+
+zenodo*
